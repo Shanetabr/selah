@@ -7,25 +7,73 @@ the bar line with a spoken count.
 
 ![Selah](docs/screenshot.png)
 
+## Download
+
+**[Download Selah for Mac](../../releases/latest)** and pick
+`Selah-BETA-mac-arm64.zip` under Assets. Ignore the two "Source code" files
+there; they are for developers.
+
+| | |
+|---|---|
+| **Works on** | Macs with Apple Silicon (M1, M2, M3, M4), macOS 13 or newer |
+| **Not sure which Mac you have?** | Apple menu → About This Mac. "Chip: Apple M…" means it works. "Processor: Intel" means use [the source](#intel-mac-or-windows-from-source) |
+| **Size** | About 155 MB to download |
+| **You need** | A key. Ask the person who sent you here |
+| **Costs** | Nothing, and no account |
+
 ## Install
 
-### Mac with Apple Silicon (M1 or newer): the app
+1. Double-click the zip you downloaded. You get **Selah BETA**.
+2. Drag **Selah BETA** into your **Applications** folder.
+3. Double-click it. macOS will say it cannot be opened. That is expected:
+   the app is not signed with a paid Apple Developer account. Click **Done**
+   (not "Move to Trash").
+4. Open **System Settings → Privacy & Security**, scroll to the bottom, and
+   click **Open Anyway** next to Selah BETA. Confirm with your password or
+   Touch ID. You only ever do this once.
+5. Selah opens and asks for your key. Type it exactly, capitals included, and
+   press Return. This is asked once per computer.
 
-1. Open the [Releases](../../releases) page and download
-   `Selah-BETA-mac-arm64.zip` from the newest release.
-2. Double-click the zip, then drag **Selah BETA** into your Applications
-   folder.
-3. Open it. macOS will refuse the first time, because the app is not signed
-   with an Apple Developer account. Open **System Settings → Privacy &
-   Security**, scroll down, and click **Open Anyway**. You only do this once.
-4. Selah asks for a key. Type the one you were given. It is asked once per
-   computer.
+That is the whole install. There is nothing else to set up.
 
-That is the whole install. Nothing else needs to be set up.
+### If something goes wrong
+
+- **"Selah BETA is damaged and can't be opened."** The download was marked
+  by macOS in a way it cannot clear by itself. Open the Terminal app, paste
+  this, press Return, then open Selah again:
+
+  ```bash
+  xattr -cr "/Applications/Selah BETA.app"
+  ```
+
+- **There is no "Open Anyway" button.** It only shows for about an hour
+  after you tried to open the app. Double-click Selah BETA again, then look
+  in Privacy & Security.
+- **"That is not a key."** Keys are case-sensitive and have no spaces. Check
+  for a space at the end if you pasted it.
+- **It opens but there is no sound.** Press **Audio…** at the top right and
+  pick your speakers, headphones or interface. If the layout says "Separate
+  channels" and you are on plain speakers, switch it to "Two feeds".
+- **macOS asks about the microphone.** That is only for voice control.
+  Saying no is fine; everything else works.
+
+### Updating
+
+Download the new zip from the same page and drag the new **Selah BETA** over
+the old one in Applications. Your songs, setlists and key stay as they are:
+they are kept outside the app, in
+`~/Library/Application Support/selah`.
+
+### Removing it
+
+Drag **Selah BETA** from Applications to the Trash. To remove your songs and
+settings as well, delete the folder `~/Library/Application Support/selah`.
 
 ### Intel Mac or Windows: from source
 
-You need [Node.js](https://nodejs.org) 22.12 or newer. Then, in a terminal:
+There is no ready-made app for these yet. You need
+[Node.js](https://nodejs.org) 22.12 or newer. Then, in a terminal, one line
+at a time:
 
 ```bash
 git clone https://github.com/Shanetabr/selah.git
@@ -45,7 +93,7 @@ npm start
 
 `npm install` also fetches the audio module for your computer, so run it on
 the computer you will use; do not copy the `node_modules` folder from another
-one.
+one. To update later, run `git pull` and then `npm install` again.
 
 ## Keys
 
