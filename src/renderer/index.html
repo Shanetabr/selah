@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+  <title>Selah BETA</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="brand">
+        <svg viewBox="96 92 320 328" width="15" height="15" aria-hidden="true">
+          <rect x="100" y="186" width="40" height="52" rx="12"/><rect x="164" y="170" width="44" height="84" rx="14"/><rect x="232" y="96" width="48" height="320" rx="16"/><rect x="304" y="170" width="44" height="84" rx="14"/><rect x="372" y="186" width="40" height="52" rx="12"/>
+        </svg>
+        SELAH <span class="tag">BETA</span>
+        <span class="spacer"></span>
+        <button id="btnSettings" title="Settings: what new songs start with, and how the section pads behave">⚙</button>
+        <span class="mode" title="EDIT: set songs up. LIVE: for the service. Nothing can be edited, the setlist is fixed, and the keyboard always controls playback."><button id="modeEdit">EDIT</button><button id="modeLive">LIVE</button></span>
+      </div>
+      <div class="transport">
+        <button id="btnPrev" title="Previous section (←)">⏮</button>
+        <button id="btnPlay" class="play" title="Play / pause (Space)">▶</button>
+        <button id="btnStop" title="Stop and rewind (Enter)">■</button>
+        <button id="btnFade" title="Fade the song out over a few seconds and stop (F)">Fade</button>
+        <button id="btnNext" title="Next section (→)">⏭</button>
+      </div>
+      <div class="clock">
+        <span id="barBeat" title="Bar . beat">1.1</span>
+        <span id="clockTime">0:00.0</span>
+        <span id="clockTotal">/ 0:00</span>
+      </div>
+      <div id="nowInfo">
+        <div id="nowSection">—</div>
+        <div id="nextInfo" title="Click or press Esc to cancel a queued jump"></div>
+      </div>
+      <div class="spacer"></div>
+      <div id="nextSong" title="The song that follows this one. Click a song in the setlist while one plays to line it up.">
+        <div class="nm"></div>
+        <div class="lbl"></div>
+      </div>
+      <button id="btnVoice">Voice<i></i></button>
+      <button id="btnAudio" title="Audio device and output routing">Audio…</button>
+    </header>
+
+    <aside id="sidebar">
+      <div class="panel-head">
+        <span>SETLIST</span>
+        <select id="setSelect" title="Choose a setlist"></select>
+        <button id="btnSetMenu" title="Setlist options">⋯</button>
+      </div>
+      <ol id="setlist"></ol>
+      <div class="panel-head">
+        <span>LIBRARY</span>
+        <div class="spacer"></div>
+        <button id="btnStems" title="Open the stems folder, to drag a song's folder onto this window">Stems…</button>
+        <button id="btnNewSong" title="Open stems or a cue clip, or start an empty song">+ Song</button>
+      </div>
+      <ul id="library"></ul>
+      <div id="about" title="Which build of Selah this is"></div>
+    </aside>
+
+    <main id="main">
+      <div id="songbar">
+        <input id="songName" class="name" type="text" spellcheck="false" placeholder="Song name" title="Song name">
+        <label title="Tempo in quarter notes per minute, as Ableton shows it">BPM <input id="songBpm" type="number" min="20" max="400" step="0.01"></label>
+        <label>Sig <input id="songNum" type="number" min="1" max="24" step="1">/<select id="songDen"><option>2</option><option selected>4</option><option>8</option><option>16</option></select></label>
+        <button id="btnDetect" title="Detect tempo and first beat from the click or drum stem">Detect</button>
+        <label id="offsetWrap" title="Time of the first downbeat (bar 1) in the audio">Bar 1 at <input id="songOffset" type="number" min="0" step="0.001"> s</label>
+        <button id="btnOffsetHere" title="Put bar 1 at the playhead">Set at playhead</button>
+        <label>Key <input id="songKey" class="key" type="text" spellcheck="false" maxlength="6"></label>
+        <span class="divider"></span>
+        <label title="Selah's click, sent to the in-ears"><input id="clickOn" type="checkbox"> Click</label>
+        <input id="clickGain" type="range" min="-40" max="6" step="0.5" title="Click level (double-click for 0 dB)">
+        <label title="Selah's guide voice: it says each section's name and counts it in, in the in-ears"><input id="cuesOn" type="checkbox"> Guide</label>
+        <button id="btnSongSettings" title="Click, guide and tempo settings for this song">Song settings</button>
+        <span id="liveInfo"></span>
+        <span class="divider"></span>
+        <button id="btnAddSection" title="Add a section marker at the playhead's bar">+ Section</button>
+        <button id="btnAddCallout" title="Add a callout at the playhead: a word the guide says there, like All In or Last Time">+ Callout</button>
+        <button id="btnImport" title="Add stems to this song, or open a folder of stems or a cue clip as a new song">Open…</button>
+      </div>
+
+      <div id="timeline">
+        <div id="rulerRow">
+          <div class="corner">
+            <div class="meters" title="Output level: mains (front of house) and ears (in-ear mix)">
+              <div class="meter"><span>MAINS</span><div class="bar"><i id="meterBand"></i></div></div>
+              <div class="meter"><span>EARS</span><div class="bar"><i id="meterCue"></i></div></div>
+            </div>
+            <div class="cornerRow">
+              <span id="corner"></span>
+              <span class="spacer"></span>
+              <button id="btnZoomOut" title="Zoom out (Ctrl -)">−</button>
+              <button id="btnZoomFit" title="Fit the song in view">Fit</button>
+              <button id="btnZoomIn" title="Zoom in (Ctrl +)">+</button>
+            </div>
+          </div>
+          <canvas id="ruler"></canvas>
+        </div>
+        <div id="rows"></div>
+        <div id="hscroll"><div id="hspacer"></div></div>
+        <div id="playhead"></div>
+        <div id="empty" hidden>
+          <div class="big" id="emptyBig">No stems yet</div>
+          <div id="emptyHint">Drop stems, a folder of stems or a cue clip (MIDI) here, or use Open.</div>
+        </div>
+      </div>
+
+      <div id="pads"></div>
+    </main>
+  </div>
+
+  <div id="overlay" hidden></div>
+  <div id="toast" hidden></div>
+
+  <script src="../shared/grid.js"></script>
+  <script src="../shared/tempo.js"></script>
+  <script src="../shared/clicktrack.js"></script>
+  <script src="../shared/structure.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
