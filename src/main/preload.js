@@ -3,8 +3,16 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   platform: process.platform,
+  editText: (action) => ipcRenderer.send('edit:text', action),
   loadLibrary: () => ipcRenderer.invoke('lib:load'),
   saveLibrary: (data) => ipcRenderer.invoke('lib:save', data),
+  planningCenter: {
+    status: () => ipcRenderer.invoke('pc:status'),
+    connect: (credentials) => ipcRenderer.invoke('pc:connect', credentials),
+    disconnect: () => ipcRenderer.invoke('pc:disconnect'),
+    plans: () => ipcRenderer.invoke('pc:plans'),
+    items: (planId) => ipcRenderer.invoke('pc:items', planId),
+  },
   appInfo: () => ipcRenderer.invoke('app:info'),
   key: { state: () => ipcRenderer.invoke('key:state'), try: (key) => ipcRenderer.invoke('key:try', key) },
   openStemsFolder: () => ipcRenderer.invoke('shell:stems'),
@@ -14,6 +22,11 @@ contextBridge.exposeInMainWorld('api', {
   confirm: (opts) => ipcRenderer.invoke('dialog:confirm', opts),
   choose: (opts) => ipcRenderer.invoke('dialog:choose', opts),
   readCue: (file) => ipcRenderer.invoke('cue:read', file),
+  chart: {
+    pick: () => ipcRenderer.invoke('chart:pick'),
+    read: (file) => ipcRenderer.invoke('chart:read', file),
+    open: (file) => ipcRenderer.invoke('chart:open', file),
+  },
   voiceWords: () => ipcRenderer.invoke('voice:words'),
   clickSounds: () => ipcRenderer.invoke('click:sounds'),
   expandPaths: (paths) => ipcRenderer.invoke('fs:expand', paths),

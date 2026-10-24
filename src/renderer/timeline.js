@@ -39,8 +39,8 @@ export class Timeline {
   //         onSectionMenu, onAddSectionAt, onEndMove, onEndDone, onEndReset, onEndMenu,
   //         getEndSnap, getEndTip }
   // The section lane edits the structure and never moves playback: drag a
-  // block to move it, drag an edge to resize it. It has no right-click: a
-  // section's menu is on its pad (the owner asked for the two to be swapped).
+  // block to move it and everything after it; resize a shared edge to trade
+  // bars with the neighbour. Selection never changes playback.
   constructor(opts) {
     this.o = opts;
     this.root = $('#timeline');
@@ -88,7 +88,20 @@ export class Timeline {
       e.preventDefault();
       this.o.onEndMenu(e.clientX, e.clientY);
     };
-    this.ruler.addEventListener('contextmenu', endMenu);
+    this.ruler.addEventListener('contextmenu', (e) => {
+      if (this.o.isLocked() || !this.o.getSong()) return;
+      const r = this.ruler.getBoundingClientRect();
+      if (e.clientY - r.top < this.laneH) {
+        const hit = this._hitAt(e.clientX - r.left);
+        if (hit) {
+          e.preventDefault();
+          this.o.onSelectSection(hit.section);
+          this.o.onSectionContext(hit.section, e.clientX, e.clientY);
+          return;
+        }
+      }
+      endMenu(e);
+    });
     this.rows.addEventListener('contextmenu', endMenu);
   }
 
@@ -201,6 +214,7 @@ export class Timeline {
     const y = e.clientY - rect.top;
     if (y < this.laneH) {
       const hit = this.o.isLocked() ? null : this._hitAt(x);
+      if (!this.o.isLocked()) this.o.onSelectSection(hit ? hit.section : null);
       if (!hit) return;
       const s = hit.section;
       this.drag = { section: s, zone: hit.zone, startX: x, bar: s.bar, end: s.bar + s.len, before: song.sections.map((q) => ({ id: q.id, bar: q.bar, len: q.len })), moved: false };
@@ -373,6 +387,11 @@ export class Timeline {
       ctx.fillRect(x0, 1, x1 - x0 - 1, this.laneH - 2);
       ctx.globalAlpha = 1;
       ctx.fillRect(x0, 1, 3, this.laneH - 2);
+      if (this.o.getSelectedSection() === s.id && !this.o.isLocked()) {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(Math.max(1, x0 + 1), 2, x1 - Math.max(1, x0 + 1) - 2, this.laneH - 4);
+      }
       ctx.save();
       ctx.beginPath();
       ctx.rect(Math.max(0, x0), 0, x1 - Math.max(0, x0) - 4, this.laneH);

@@ -1,7 +1,8 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, Menu, protocol, net, utilityProcess, powerSaveBlocker, shell, systemPreferences } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, protocol, net, utilityProcess, powerSaveBlocker, shell, systemPreferences, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { fork } = require('child_process');
 const { pathToFileURL } = require('url');
 const { Library, isAudioFile, AUDIO_EXT } = require('./library');
 const cuefile = require('./cuefile');
@@ -9,7 +10,8 @@ const samples = require('../engine/samples');
 const vault = require('../engine/vault');
 
 const isDev = process.argv.includes('--dev');
-const selfTest = process.argv.includes('--selftest');
+const noAudioTest = process.argv.includes('--selftest-no-audio');
+const selfTest = noAudioTest || process.argv.includes('--selftest');
 
 // Keep our data out of the default "Electron" folder that every unpackaged
 // Electron app shares, and off any synced Documents/Desktop folder.
@@ -62,7 +64,10 @@ function sendToWindow(channel, msg) {
 }
 
 function startEngine() {
-  engine = utilityProcess.fork(path.join(SRC, 'engine', 'engine-process.js'), [], { serviceName: 'Selah audio engine' });
+  engine = utilityProcess.fork(path.join(SRC, 'engine', 'engine-process.js'), [], {
+    serviceName: 'Selah audio engine',
+    env: { ...process.env, SELAH_TEST_OUTPUT: noAudioTest ? '1' : '0' },
+  });
   engine.on('message', (msg) => {
     if (msg.type === 'state') setSleepBlock(msg.playing);
     sendToWindow('engine:event', msg);
@@ -147,6 +152,7 @@ function buildMenu() {
       label: 'File',
       submenu: [
         { label: 'Open…', accelerator: 'CmdOrCtrl+O', click: send('open') },
+        { label: 'Import PDF Chart…', click: send('importChart') },
         // Only macOS can offer files and folders in one dialog.
         ...(process.platform === 'darwin' ? [] : [{ label: 'Open Folder of Stems…', accelerator: 'CmdOrCtrl+Shift+O', click: send('newFromFolder') }]),
         { label: 'New Empty Song…', accelerator: 'CmdOrCtrl+N', click: send('newSong') },
@@ -165,9 +171,11 @@ function buildMenu() {
         { label: 'Redo', accelerator: 'Shift+CmdOrCtrl+Z', click: send('redo') },
         { type: 'separator' },
         { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' },
+        { label: 'Copy', accelerator: 'CmdOrCtrl+C', click: send('copy') },
+        { label: 'Paste', accelerator: 'CmdOrCtrl+V', click: send('paste') },
         { role: 'selectAll' },
+        { type: 'separator' },
+        { label: 'Rename Song…', accelerator: 'CmdOrCtrl+R', click: send('renameSong') },
       ],
     },
     {
@@ -177,7 +185,7 @@ function buildMenu() {
         { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: send('zoomOut') },
         { type: 'separator' },
         { role: 'togglefullscreen' },
-        ...(isDev ? [{ type: 'separator' }, { role: 'reload' }, { role: 'toggleDevTools' }] : []),
+        ...(isDev ? [{ type: 'separator' }, { role: 'reload', accelerator: 'CmdOrCtrl+Shift+R' }, { role: 'toggleDevTools' }] : []),
       ],
     },
   ];
@@ -185,8 +193,58 @@ function buildMenu() {
 }
 
 function registerIpc() {
+  ipcMain.on('edit:text', (e, action) => {
+    if (action === 'copy') e.sender.copy();
+    else if (action === 'paste') e.sender.paste();
+  });
   ipcMain.handle('lib:load', () => library.load());
   ipcMain.handle('lib:save', (e, data) => library.save(data));
+
+  const pcFile = () => path.join(app.getPath('userData'), 'planning-center.enc');
+  const readPc = () => {
+    try {
+      if (!safeStorage.isEncryptionAvailable()) return null;
+      return JSON.parse(safeStorage.decryptString(fs.readFileSync(pcFile())));
+    } catch (_) { return null; }
+  };
+  const pcRequest = async (endpoint) => {
+    const credentials = readPc();
+    if (!credentials) throw new Error('Connect Planning Center in Settings first.');
+    const auth = Buffer.from(credentials.appId + ':' + credentials.secret).toString('base64');
+    const response = await fetch('https://api.planningcenteronline.com/services/v2/' + endpoint, {
+      headers: { Authorization: 'Basic ' + auth, Accept: 'application/json' },
+    });
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) throw new Error('Planning Center did not accept these credentials. Check the API application ID and secret, and its access.');
+      throw new Error('Planning Center returned ' + response.status + '.');
+    }
+    return response.json();
+  };
+  ipcMain.handle('pc:status', () => !!readPc());
+  ipcMain.handle('pc:connect', async (_e, input) => {
+    if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure credential storage is unavailable on this computer.');
+    const credentials = { appId: String(input?.appId || '').trim(), secret: String(input?.secret || '').trim() };
+    if (!credentials.appId || !credentials.secret) throw new Error('Enter both Planning Center API credentials.');
+    const auth = Buffer.from(credentials.appId + ':' + credentials.secret).toString('base64');
+    const response = await fetch('https://api.planningcenteronline.com/services/v2/plans?per_page=1', { headers: { Authorization: 'Basic ' + auth, Accept: 'application/json' } });
+    if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? 'Planning Center did not accept those credentials or they lack Services access.' : 'Planning Center returned ' + response.status + '.');
+    fs.writeFileSync(pcFile(), safeStorage.encryptString(JSON.stringify(credentials)), { mode: 0o600 });
+    return true;
+  });
+  ipcMain.handle('pc:disconnect', () => { fs.rmSync(pcFile(), { force: true }); return true; });
+  ipcMain.handle('pc:plans', async () => {
+    const result = await pcRequest('plans?order=-sort_date&per_page=50');
+    return (result.data || []).map((plan) => ({ id: plan.id, title: plan.attributes?.title || plan.attributes?.dates || 'Plan', dates: plan.attributes?.dates || '' }));
+  });
+  ipcMain.handle('pc:items', async (_e, planId) => {
+    if (!/^\d+$/.test(String(planId))) throw new Error('Choose a valid Planning Center plan.');
+    const result = await pcRequest('plans/' + planId + '/items?per_page=100&include=song');
+    const songs = new Map((result.included || []).filter((x) => x.type === 'Song').map((x) => [x.id, x.attributes?.title || x.attributes?.name]));
+    return (result.data || []).filter((item) => item.attributes?.item_type === 'song' || item.relationships?.song?.data).map((item) => ({
+      title: songs.get(item.relationships?.song?.data?.id) || item.attributes?.title || '',
+      itemType: item.attributes?.item_type || '',
+    })).filter((item) => item.title.trim());
+  });
 
   ipcMain.handle('dialog:stems', async () => {
     const res = await dialog.showOpenDialog(win, {
@@ -200,9 +258,9 @@ function registerIpc() {
   // Everything Selah opens: stems, a folder of stems (a new song), cue clips.
   ipcMain.handle('dialog:open', async () => {
     const res = await dialog.showOpenDialog(win, {
-      title: 'Open stems, a folder of stems, or a cue clip',
+      title: 'Open stems, a cue clip, or a PDF chart',
       properties: process.platform === 'darwin' ? ['openFile', 'openDirectory', 'multiSelections'] : ['openFile', 'multiSelections'],
-      filters: [{ name: 'Stems and cue clips', extensions: [...Array.from(AUDIO_EXT, (x) => x.slice(1)), 'mid', 'midi'] }],
+      filters: [{ name: 'Stems, cue clips and charts', extensions: [...Array.from(AUDIO_EXT, (x) => x.slice(1)), 'mid', 'midi', 'pdf'] }],
     });
     return res.canceled ? [] : res.filePaths;
   });
@@ -229,6 +287,46 @@ function registerIpc() {
     voiceWords = voiceWords || samples.names();
     return cuefile.read(file, (w) => voiceWords.has(w));
   });
+
+  ipcMain.handle('chart:pick', async () => {
+    const res = await dialog.showOpenDialog(win, { title: 'Import a PDF lead sheet', properties: ['openFile'], filters: [{ name: 'PDF lead sheets', extensions: ['pdf'] }] });
+    return res.canceled ? null : res.filePaths[0];
+  });
+  const readableCharts = new Set();
+  let readingChart = false;
+  ipcMain.handle('chart:read', async (e, file) => {
+    if (readingChart) throw new Error('A chart is already being read.');
+    if (typeof file !== 'string' || !path.isAbsolute(file) || !/\.pdf$/i.test(file)) throw new Error('Choose a PDF chart.');
+    readingChart = true;
+    try {
+      const draft = await new Promise((resolve, reject) => {
+        // PDF.js treats Electron utility processes as browser renderers.
+        // Electron's Node mode gives it the Node worker/font adapters while
+        // keeping parsing isolated from the main and audio processes.
+        const child = fork(path.join(__dirname, 'chart-process.js'), [], {
+          execPath: process.execPath, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+          stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        });
+        let done = false;
+        const finish = (error, draft) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          child.kill();
+          if (error) reject(new Error(error));
+          else resolve(draft);
+        };
+        const timer = setTimeout(() => finish('This chart took too long to read. Try a smaller PDF.'), 30000);
+        child.on('message', (m) => finish(m.error, m.draft));
+        child.on('error', (err) => finish(err.message));
+        child.on('exit', () => finish('The chart reader stopped. Try another PDF.'));
+        child.send(file);
+      });
+      readableCharts.add(file);
+      return draft;
+    } finally { readingChart = false; }
+  });
+  ipcMain.handle('chart:open', (e, file) => readableCharts.has(file) ? shell.openPath(file) : 'Import this chart first.');
 
   ipcMain.handle('dialog:confirm', async (e, { message, detail, button }) => {
     if (selfTest) return true; // nobody is there to press the button
@@ -324,7 +422,7 @@ function registerIpc() {
   // cue clips. A folder of nothing but cue clips counts as loose clips.
   // Folders are read one level deep.
   ipcMain.handle('fs:expand', async (e, paths) => {
-    const out = { folders: [], files: [], cues: [] };
+    const out = { folders: [], files: [], cues: [], charts: [] };
     for (const p of paths) {
       try {
         const st = await fs.promises.stat(p);
@@ -336,6 +434,7 @@ function registerIpc() {
           else out.cues.push(...cues);
         } else if (isAudioFile(p)) out.files.push(p);
         else if (cuefile.isCueFile(p)) out.cues.push(p);
+        else if (/\.pdf$/i.test(p)) out.charts.push(p);
       } catch (err) {
         // Unreadable entries are skipped.
       }

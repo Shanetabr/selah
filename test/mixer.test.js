@@ -868,3 +868,62 @@ test('each track reports the level it is being heard at, for its meter', () => {
   run(m, 400, 100);
   assert.deepStrictEqual(Object.keys(m.takeTrackPeaks()), ['soft']);
 });
+
+function mappingMixer(extra = {}) {
+  const m = new Mixer({ sampleRate: RATE, channels: 4 });
+  m.setBuses({ band: { mode: 'stereo', ch: 0, gain: 1 }, cue: { mode: 'stereo', ch: 2, gain: 1 } });
+  const words = new Map(['verse', 'chorus', '1', '2', '3', '4', '5', '6'].map((w) => [w, new Float32Array([w === 'chorus' ? 0.5 : 0.25])]));
+  m.setSounds({ words });
+  m.setSong({ ...song([]), bars: 16, cues: { enabled: true, mapping: true, gain: 1, start: 'one', section: 'one', sections: [], ...extra } });
+  playNow(m);
+  m.pos = 137; // Deliberately between beats: a live tap must not wait.
+  return m;
+}
+
+test('mapping speaks on the first render frame, counts at tempo, and only uses ears', () => {
+  const m = mappingMixer();
+  m.mapCue('Verse');
+  const out = run(m, 1800, 37);
+  assert.deepEqual(Array.from(out[2]).flatMap((x, i) => x ? [i] : []), [0, 500, 1000, 1500]);
+  assert.deepEqual(out[2], out[3]);
+  assert.ok(out[0].every((x) => x === 0) && out[1].every((x) => x === 0));
+  assert.equal(m.pos, 1937);
+  assert.equal(m.pending, null);
+});
+
+test('a newer mapping tap replaces the old count and survives timeline updates', () => {
+  const m = mappingMixer();
+  m.mapCue('Verse'); run(m, 250, 50);
+  m.mapCue('Chorus');
+  m.setCues({ ...m.song.cues, sections: [{ bar: 1, name: 'Verse' }] });
+  const out = run(m, 1600, 64)[2];
+  assert.equal(out[0], 0.5);
+  assert.deepEqual(Array.from(out).flatMap((x, i) => x ? [i] : []), [0, 500, 1000, 1500]);
+});
+
+test('mapping counts honour half-time, double-bar scale, and paused/finished state', () => {
+  const m = mappingMixer({ speed: 'half', scale: 2, enabled: false });
+  m.mapCue('Verse');
+  assert.deepEqual(m.mapCount.events.map((e) => e.frame), [137, 2137, 4137, 6137]);
+  assert.equal(run(m, 1, 1)[2][0], 0.25); // Explicit taps remain audible like normal pads.
+  m.pause(); m.mapCue('Chorus'); assert.equal(m.mapCount, null);
+  m.stop(); m.setCues({ ...m.song.cues, mapping: false });
+  playNow(m); m.mapCue('Verse'); assert.equal(m.mapCount, null);
+});
+
+test('normal guide resumes after a live mapping count without duplicating it', () => {
+  const m = mappingMixer({ sections: [{ bar: 3, name: 'Chorus' }] });
+  m.mapCue('Verse');
+  const out = run(m, 4000, 64)[2];
+  assert.equal(out[0], 0.25);
+  assert.equal(out[4000 - 137], 0.5); // Normal Chorus cue starts at song time 4s.
+});
+
+
+test('mapping can override an initial count-in immediately before bar one', () => {
+  const m = mappingMixer();
+  m.pos = -500;
+  m.mapCue('Chorus');
+  assert.equal(run(m, 1, 1)[2][0], 0.5);
+  assert.equal(m.pos, -499);
+});

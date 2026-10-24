@@ -36,6 +36,7 @@ packager({
   icon: require('fs').existsSync(iconFile) ? iconFile : undefined,
   platform,
   arch,
+  electronZipDir: process.env.SELAH_ELECTRON_ZIP_DIR || undefined,
   overwrite: true,
   prune: true,
   // Left unpacked so the native audio module and the engine script load

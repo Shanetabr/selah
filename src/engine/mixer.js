@@ -69,6 +69,7 @@ class Mixer {
     this.cuePlan = null; // [{ frame, snd }] spoken cues of the song, built on demand
     this.calloutPlan = null; // [{ frame, snd }] the song's callouts, likewise
     this.jcue = null; // the cue for a pending jump; replaces the plan until it lands
+    this.mapCount = null;
     this.lead = null; // { events, until }: the count for a tap that started playback
     this.voices = []; // cue samples sounding now: { snd, at }
     this.clickGrid = null; // the click's own grid when the song is written at double tempo
@@ -118,6 +119,7 @@ class Mixer {
     this.clickCur = 0;
     this.cuePlan = null;
     this.calloutPlan = null;
+    this.mapCount = null;
     this.lead = null;
     this.voices.length = 0;
     this.cueCur = 0;
@@ -162,6 +164,7 @@ class Mixer {
   setCues(cues) {
     if (!this.song) return;
     this.song.cues = cues;
+    if (!cues.mapping) this.mapCount = null;
     this.cuePlan = null;
     this.calloutPlan = null;
   }
@@ -255,6 +258,7 @@ class Mixer {
   play() {
     if (!this.song || this.song.length === 0) return;
     if (this.pos >= this.song.length) this.pos = 0;
+    this.mapCount = null;
     this.lead = null;
     // From the top, a first-section cue that has no room in the song plays
     // as a count-in before it.
@@ -268,7 +272,22 @@ class Mixer {
     this.fadeLen = this.fadeFrames;
   }
 
+  // A mapping tap speaks at the next render position, never at a UI timestamp
+  // or a future bar line. Reuse the normal meter/speed-aware one-bar count.
+  mapCue(name) {
+    const cues = this.song && this.song.cues;
+    if (!this.playing || this.tTarget === 0 || !cues || !cues.mapping || !this.sounds) return;
+    const words = this.sounds.words;
+    const count = Cues.countedJump(this.song.grid, name, (w) => words.has(w), cues.speed, cues.scale);
+    const events = count.events(count.lead).map((e) => ({ frame: this.pos + Math.round(e.sec * this.rate), snd: words.get(e.word) }));
+    this.mapCount = { events, until: Math.max(this.pos + Math.round(count.lead * this.rate), ...events.map((e) => e.frame + (e.snd ? e.snd.length : 0))) };
+    // A new live choice supersedes the old announcement and its remaining count.
+    this.voices.length = 0;
+    this.lead = null;
+  }
+
   pause() {
+    this.mapCount = null;
     this.pending = null;
     if (this.playing) {
       this.tTarget = 0;
@@ -278,6 +297,7 @@ class Mixer {
   }
 
   stop() {
+    this.mapCount = null;
     this.pending = null;
     if (this.playing) {
       this.tTarget = 0;
@@ -302,6 +322,7 @@ class Mixer {
     if (!this.song) return;
     frame = Math.max(0, Math.min(this.song.length, Math.round(frame)));
     this.pending = null;
+    this.mapCount = null;
     this.lead = null;
     if (this.playing) this.xf = { oldPos: this.pos, len: this.xfFrames, done: 0 };
     this.pos = frame;
@@ -317,6 +338,7 @@ class Mixer {
     if (!this.song || this.song.length === 0) return;
     const to = Math.max(0, Math.min(this.song.length, Grid.barToFrame(this.song.grid, bar, this.rate)));
     let start = to;
+    this.mapCount = null;
     this.lead = null;
     if (this._cueSection(bar)) {
       for (const e of this._plan()) if (e.bar === bar && e.frame < start) start = e.frame;
@@ -692,7 +714,10 @@ class Mixer {
     // One list at a time, so a section is never announced twice: the jump's
     // cue while a jump is pending, otherwise the song's own, with its callouts.
     const jump = ready && this.pending && this.jcue ? this.jcue : null;
-    if (jump) start(jump, true);
+    if (ready && this.mapCount) {
+      start(this.mapCount.events, true);
+      if (pos + seg >= this.mapCount.until) this.mapCount = null;
+    } else if (jump) start(jump, true);
     else if (on) {
       start(this._plan(), false);
       start(this._callouts(), false);

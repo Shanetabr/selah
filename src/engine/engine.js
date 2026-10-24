@@ -6,7 +6,9 @@ const samples = require('./samples');
 const vault = require('./vault');
 
 const STATE_INTERVAL_MS = 33;
-const MAX_CACHED_SONGS = 3;
+// The playing song and the one lined up next: a third full multitrack song
+// can be over a gigabyte, enough to push a smaller Mac into swapping.
+const MAX_CACHED_SONGS = 2;
 
 // Owns the output device, the mixer and the decoded songs. Driven by plain
 // message objects ({ cmd, ... }) and reports back through `emit`, so it runs
@@ -328,6 +330,10 @@ class Engine {
 
   cmd_jumpToBar(msg) {
     if (this.mixer) this.mixer.jumpToBar(msg.bar, msg.count);
+  }
+
+  cmd_mapCue(msg) {
+    if (this.mixer && msg.songId === this.currentId && typeof msg.name === 'string') this.mixer.mapCue(msg.name);
   }
 
   cmd_cancelJump() {

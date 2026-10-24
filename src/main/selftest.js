@@ -124,6 +124,133 @@ async function run({ app, getWindow, library, onEngine }) {
     }
   };
 
+  // Fast UI-only checks: no generated stems or playback sequence needed.
+  async function runUIChecks() {
+    await js(`window.__app.newSampleSong()`);
+    await js(`window.__app.createSong('Another Song'); window.__app.setLive(false)`);
+    const before = await js('JSON.stringify(window.__app.state.song)');
+    await js(`document.querySelector('#btnSettings').click()`);
+    check('settings opens on Playback with the other categories hidden', await js(`document.querySelectorAll('.settings-page:not([hidden])').length === 1 && !document.querySelector('#settings-playback').hidden && document.querySelector('#settings-about').hidden`));
+    await js(`document.querySelector('[data-page="defaults"]').click()`);
+    check('defaults and activation are separated from playback settings', await js(`!document.querySelector('#settings-defaults').hidden && document.querySelector('#setPause').closest('section').hidden && document.querySelector('#keyLevel').closest('section').hidden`));
+    await js(`(() => {
+      const lead = document.querySelector('#settings-defaults select:last-of-type');
+      lead.selectedIndex = Array.from(lead.options).findIndex((o) => o.textContent === 'Other…'); lead.dispatchEvent(new Event('change'));
+    })()`);
+    check('editing defaults preserves the selected page and the current song', await js(`!document.querySelector('#settings-defaults').hidden && window.__app.state.lib.settings.defaults.cues.section.n === 2 && JSON.stringify(window.__app.state.song) === ${JSON.stringify(before)}`));
+    const size = win.getSize();
+    win.setSize(980, 560);
+    await sleep(150);
+    check('settings navigation and Done stay visible at minimum window size', await js(`(() => {
+      const nav = document.querySelector('.settings-nav').getBoundingClientRect();
+      const done = document.querySelector('.settings-footer .primary').getBoundingClientRect();
+      return nav.top >= 0 && done.bottom <= innerHeight && done.right <= innerWidth;
+    })()`));
+    await shot('selah-selftest-settings-cleanup.png');
+    win.setSize(...size);
+    await js(`document.querySelector('[data-page="voice"]').click(); document.querySelector('[data-page="about"]').click()`);
+    check('About shows version and activation', await js(`!document.querySelector('#settings-about').hidden && document.querySelector('#settings-about').textContent.includes('0.3.0') && document.querySelector('#btnChangeKey').offsetParent !== null`));
+    await js(`document.querySelector('.settings-footer .primary').click(); (() => { const s = document.querySelector('#librarySearch'); s.value = 'sAmPlE'; s.dispatchEvent(new Event('input')); })()`);
+    check('library search filters case-insensitively without changing the setlist', await js(`document.querySelectorAll('#library li').length === 1 && document.querySelector('#library li .nm').textContent === 'Sample Song' && document.querySelectorAll('#setlist li').length === 2`));
+    await js(`(() => { const s = document.querySelector('#librarySearch'); s.value = 'no matching title'; s.dispatchEvent(new Event('input')); })()`);
+    check('empty search results provide a recovery hint', await js(`document.querySelectorAll('#library li').length === 0 && document.querySelector('#library [role="status"]').textContent.includes('No matching songs')`));
+    await js(`window.__app.setLive(true); (() => {
+      const s = document.querySelector('#librarySearch'); s.focus();
+      for (const [key, code] of [[' ', 'Space'], ['1', 'Digit1'], ['f', 'KeyF']]) s.dispatchEvent(new KeyboardEvent('keydown', { key, code, bubbles: true, cancelable: true }));
+    })()`);
+    await sleep(150);
+    check('typing in LIVE search does not start playback or jump', await js(`!window.__app.state.eng.playing && window.__app.state.eng.pos === 0 && !window.__app.state.eng.pending`));
+    await js(`document.querySelector('#librarySearch').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`);
+    check('Escape clears search and returns focus to playback', await js(`document.querySelector('#librarySearch').value === '' && document.activeElement.id !== 'librarySearch' && document.querySelectorAll('#library li').length === 2`));
+    await js(`window.__app.setLive(false)`);
+  }
+
+  // Optional real lead sheet: never copy a licensed chart into the repo.
+  async function runChartChecks() {
+    if (!process.env.SELFTEST_CHART) return;
+      const chartPath = JSON.stringify(process.env.SELFTEST_CHART);
+      const beforeChart = await js('JSON.stringify(window.__app.state.song)');
+      const beginChart = async () => {
+        await js(`void window.__app.importChart(${chartPath})`);
+        await until('!!window.__app.state.chartReview?.getDraft || window.__app.state.chartReview === null', 35000, 'chart reader and review');
+        if (!await js('!!window.__app.state.chartReview?.getDraft')) throw new Error(await js('document.querySelector("#toast").textContent'));
+      };
+      await beginChart();
+      const firstDraft = await js('window.__app.state.chartReview.getDraft()');
+      check('chart import shows a complete draft without changing the song or enabling approval', firstDraft.sections.length > 0 && await js('JSON.stringify(window.__app.state.song)') === beforeChart && await js('document.querySelector("#chartApply").disabled'));
+      await shot('selah-selftest-chart-review.png');
+      const chartSize = win.getSize();
+      win.setSize(980, 600);
+      await sleep(150);
+      const reviewBounds = await js(`(() => {
+        const button = document.querySelector('#chartApply').getBoundingClientRect();
+        const check = document.querySelector('#chartConfirm').getBoundingClientRect();
+        return { fits: button.bottom <= innerHeight && button.right <= innerWidth && check.bottom <= innerHeight, color: document.querySelector('.chart-block').style.getPropertyValue('--section-color') };
+      })()`);
+      check('chart approval stays visible at minimum window size and sections retain their colors', reviewBounds.fits && reviewBounds.color.startsWith('#'), JSON.stringify(reviewBounds));
+      await shot('selah-selftest-chart-small.png');
+      win.setSize(chartSize[0], chartSize[1]);
+      await sleep(100);
+      await js('window.__app.state.chartReview.close()');
+      check('canceling chart review leaves the complete original song intact', await js('JSON.stringify(window.__app.state.song)') === beforeChart);
+      await beginChart();
+      await js(`(() => {
+        const length = document.querySelector('#chartSectionLength');
+        length.value = '6'; length.dispatchEvent(new Event('change', { bubbles: true }));
+        document.querySelector('#chartDuplicate').click();
+        const repeated = window.__app.state.chartReview.getDraft().sections[1].id;
+        document.querySelector('#chartAddSection').click();
+        document.querySelector('#chartRemove').click();
+        Array.from(document.querySelectorAll('.chart-section-row')).find((r) => r.dataset.section === repeated).click();
+        Array.from(document.querySelectorAll('.chart-inspector button')).find((b) => b.textContent === '← Earlier').click();
+        Array.from(document.querySelectorAll('.chart-inspector button')).find((b) => b.textContent === 'Later →').click();
+        document.querySelector('#chartAddDirection').click();
+      })()`);
+      const editedChart = await js('window.__app.state.chartReview.getDraft()');
+      check('chart editor resizes and repeats sections and adds an approved band direction', editedChart.sections.length === firstDraft.sections.length + 1 && editedChart.sections[0].len === 6 && editedChart.sections[1].len === 6 && editedChart.sections[1].callouts.some((c) => c.enabled));
+      await js(`document.querySelector('#chartUndo').click()`);
+      check('chart draft Undo removes the last direction without touching the song', await js('window.__app.state.chartReview.getDraft().sections[1].callouts.length') === 0 && await js('JSON.stringify(window.__app.state.song)') === beforeChart);
+      await js(`document.querySelector('#chartRedo').click(); document.querySelector('#chartConfirm').click()`);
+      check('repeat stays visible with its count-in off by default', await js(`window.__app.state.chartReview.getDraft().sections[1].cue === 'off' && !document.querySelector('#chartSectionCountIn').checked && document.querySelectorAll('.chart-cue-off').length === 1`));
+      await js(`document.querySelector('#chartSectionCountIn').click()`);
+      check('count-in can be restored and changing it requires approval again', await js(`!window.__app.state.chartReview.getDraft().sections[1].cue && document.querySelector('#chartApply').disabled`));
+      await js(`document.querySelector('#chartSectionCountIn').click(); document.querySelector('#chartMerge').click()`);
+      check('merge combines both intros and keeps the repeated direction at its original bar', await js(`(() => {
+        const d = window.__app.state.chartReview.getDraft();
+        return d.sections.length === ${firstDraft.sections.length} && d.sections[0].len === 12 && d.sections[0].callouts.some((c) => c.enabled && c.at === 6);
+      })()`));
+      await js(`document.querySelector('#chartUndo').click()`);
+      check('undo merge restores the two separate intros and the silent repeat', await js(`window.__app.state.chartReview.getDraft().sections[1].cue === 'off' && window.__app.state.chartReview.getDraft().sections[0].len === 6`));
+      await js(`document.querySelectorAll('.chart-section-row')[1].click(); document.querySelector('#chartConfirm').click()`);
+      await sleep(150); // Let Chromium paint the restored blocks before capturing.
+      await shot('selah-selftest-chart-approved.png');
+      await js(`document.querySelector('#chartApply').click()`);
+      await until('window.__app.state.chartReview === null', 5000, 'chart approval applied');
+      const afterChart = await js('JSON.stringify(window.__app.state.song)');
+      const appliedChart = JSON.parse(afterChart);
+      check('approval preserves the repeated section guide setting in the song', appliedChart.sections[1].cue === 'off');
+      check('approval applies exactly the reviewed section order and directions', appliedChart.sections.length === firstDraft.sections.length + 1 && appliedChart.sections[0].len === 6 && appliedChart.sections[1].bar === 6 && appliedChart.callouts.some((c) => c.bar === 6));
+      await js('window.__app.undo()');
+      check('one song Undo restores the setup from before chart import', await js('JSON.stringify(window.__app.state.song)') === beforeChart);
+      await js('window.__app.redo()');
+      check('song Redo restores the approved chart setup', require('node:util').isDeepStrictEqual(JSON.parse(await js('JSON.stringify(window.__app.state.song)')), JSON.parse(afterChart)));
+      await beginChart();
+      await js(`(() => {
+        const select = document.querySelector('#chartTarget'); select.value = 'new'; select.dispatchEvent(new Event('change'));
+        const name = document.querySelector('#chartSongName'); name.value = 'Chart Import New Song'; name.dispatchEvent(new Event('change'));
+        document.querySelector('#chartConfirm').click(); document.querySelector('#chartApply').click();
+      })()`);
+      await until('window.__app.state.chartReview === null && window.__app.state.song.name === "Chart Import New Song"', 5000, 'new chart song');
+      check('chart can create a separate click-only song with the chart tempo', await js('window.__app.state.song.tracks.length === 0 && window.__app.state.song.bpm === ' + firstDraft.bpm));
+      await sleep(400);
+      check('approved chart survives library persistence', await js('(async () => { const lib = await window.api.loadLibrary(); return lib.songs.some((s) => s.name === "Chart Import New Song" && s.sections.length === ' + firstDraft.sections.length + '); })()'));
+      await js('window.__app.setLive(true)');
+      await js(`void window.__app.importChart(${chartPath})`);
+      check('LIVE mode cannot import charts', await js('window.__app.state.chartReview === null'));
+      await js('window.__app.setLive(false)');
+    }
+
+
   // The window cannot take the keyboard during a self-test (see createWindow
   // in main.js): keys the owner pressed for another app used to land here and
   // start, pause or stop playback mid-test, which is what the "playback did
@@ -183,12 +310,14 @@ async function run({ app, getWindow, library, onEngine }) {
   fs.mkdirSync(stemDir);
   let failed = false;
   try {
-    await makeStems(stemDir);
+    if (!process.env.SELFTEST_UI_ONLY) await makeStems(stemDir);
     if (win.webContents.isLoading()) await new Promise((r) => win.webContents.once('did-finish-load', r));
     await until('!!(window.__app && window.__app.state.out)', 15000, 'audio output');
     const out = await js('window.__app.state.out');
     check('audio output opened', out.ok, `${out.apiName} / ${out.deviceName} / ${out.channels} ch / ${out.sampleRate} Hz`);
     await shot('selah-selftest-empty.png');
+
+    if (process.env.SELFTEST_UI_ONLY) { await runUIChecks(); } else {
 
     // Keep the test quiet on whatever is plugged in.
     await js(`(() => { const b = window.__app.state.lib.settings.buses; b.band.gain = 0.05; b.cue.gain = 0.05; window.__app.send({ cmd: 'setBuses', buses: b }); })()`);
@@ -224,6 +353,7 @@ async function run({ app, getWindow, library, onEngine }) {
     check('first beat lines up across stems after resampling', Math.abs(onClick - FIRST_BEAT * rate) <= 24 && Math.abs(onClick - onDrums) <= 24, `click ${onClick}, drums ${onDrums}, expected ${FIRST_BEAT * rate}`);
     check('waveform peaks loaded for every track', await js('window.__app.state.song.tracks.every((t) => window.__app.state.peaks.get(t.id) && window.__app.state.peaks.get(t.id).length > 1000)'));
 
+    if (process.env.SELFTEST_CHART_ONLY) { await runChartChecks(); } else {
     // --- 2. tempo, click, sections ---
     await js('window.__app.detectTempo()');
     const tempo = await js('({ bpm: window.__app.state.song.bpm, offset: window.__app.state.song.offset })');
@@ -258,7 +388,7 @@ async function run({ app, getWindow, library, onEngine }) {
     mouse('mouseUp', edgeTo.x - 2, edgeTo.y + 10);
     await sleep(150);
     st = await blocks();
-    check('dragging a right edge makes the section longer and the rest follow', st['Verse 1'][0] === 2 && st['Verse 1'][1] === 5 && st.Chorus[0] === 9 && st.Bridge[0] === 13, JSON.stringify(st));
+    check('resizing into a gap leaves later sections in place', st['Verse 1'][0] === 2 && st['Verse 1'][1] === 5 && st.Chorus[0] === 8 && st.Bridge[0] === 12, JSON.stringify(st));
     await js('window.__app.undo()');
     await sleep(150);
     st = await blocks();
@@ -267,7 +397,7 @@ async function run({ app, getWindow, library, onEngine }) {
     mouse('mouseDown', verse.x + 30, verse.y + 10);
     mouse('mouseUp', verse.x + 30, verse.y + 10);
     await sleep(250);
-    check('clicking a section block does not move the playhead', last.pos === 0 && !last.pending, `${last.pos.toFixed(3)}s`);
+    check('clicking a section selects it without moving playback', last.pos === 0 && !last.pending && await js(`window.__app.state.sectionId === window.__app.state.song.sections.find((s) => s.name === 'Verse 1').id && document.querySelectorAll('#pads .selected').length === 1`), `${last.pos.toFixed(3)}s`);
     await js(`document.querySelectorAll('#pads .pad')[1].click()`);
     await sleep(250);
     check('tapping a section pad while stopped moves the playhead to it', Math.abs(last.pos - (tempo.offset + 2 * 4 * BEAT)) < 0.001, `${last.pos.toFixed(3)}s`);
@@ -603,6 +733,12 @@ async function run({ app, getWindow, library, onEngine }) {
         await js(`window.__app.send({ cmd: 'stop' })`);
         await sleep(300);
       } else console.log(`INFO  could not open ${stereo.name} (${now.error}); stereo-device check skipped`);
+      // Later checks use the original channel map. Return to the interface
+      // after testing the stereo fallback, or ears on 3-4 stay silent.
+      await js(`(() => { const a = window.__app; Object.assign(a.state.lib.settings.audio, { apiId: ${JSON.stringify(out.apiId)}, deviceName: ${JSON.stringify(out.deviceName)} }); a.send({ cmd: 'getDevices' }); })()`);
+      await until(`window.__app.state.out && window.__app.state.out.ok && window.__app.state.out.deviceName === ${JSON.stringify(out.deviceName)}`, 20000, 'original device restored');
+      await until(`window.__app.state.eng.songId === window.__app.state.song.id`, 20000, 'song reloaded on original device');
+      check('the original interface is restored after the stereo-device check', (await js('window.__app.state.out.channels')) === out.channels);
     } else console.log('INFO  no second stereo device; stereo-device check skipped');
 
     // The built-in sample song: laid out end to end, cues on, nothing to import.
@@ -895,10 +1031,24 @@ async function run({ app, getWindow, library, onEngine }) {
       pad().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 300 }));
       out.live = document.querySelectorAll('.menu button').length;
       a.setLive(false);
-      // The strip above the bar numbers has no menu any more.
+      // The timeline offers the same section menu, including when scrolled.
+      const tl = a.getTimeline();
+      tl.scrollT = window.Grid.barToSeconds(a.state.song, a.state.song.sections[1].bar);
+      tl.requestDraw();
+      a.drawFrame();
       const ruler = document.querySelector('#ruler').getBoundingClientRect();
       document.querySelector('#ruler').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: ruler.left + 20, clientY: ruler.top + 5 }));
       out.strip = document.querySelectorAll('.menu button').length;
+      out.stripSelected = a.state.sectionId;
+      item('Tag').click();
+      out.stripRenamed = a.state.song.sections.find((s) => s.id === out.stripSelected).name;
+      a.undo();
+      a.setLive(true);
+      document.querySelector('#ruler').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: ruler.left + 20, clientY: ruler.top + 5 }));
+      out.stripLive = document.querySelectorAll('.menu button').length;
+      a.setLive(false);
+      tl.scrollT = 0;
+      tl.requestDraw();
       out.back = names();
       return out;
     })()`);
@@ -906,8 +1056,108 @@ async function run({ app, getWindow, library, onEngine }) {
       const was = padSwap.was.split(',');
       const swapped = was.slice();
       swapped[1] = 'Tag';
-      check('right-clicking a pad changes, silences or deletes that section; the timeline strip has no menu', padSwap.items >= 15 && padSwap.ticked === '✓ ' + was[1] && padSwap.now === swapped.join() && padSwap.shown === 'Tag' && padSwap.undone === padSwap.was && padSwap.fewer === was.filter((x, i) => i !== 1).join() && padSwap.cue === 'off' && padSwap.live === 0 && padSwap.strip === 0 && padSwap.back === padSwap.was, JSON.stringify(padSwap));
+      check('pads and timeline share the section menu; LIVE blocks both', padSwap.items >= 15 && padSwap.ticked === '✓ ' + was[1] && padSwap.now === swapped.join() && padSwap.shown === 'Tag' && padSwap.undone === padSwap.was && padSwap.fewer === was.filter((x, i) => i !== 1).join() && padSwap.cue === 'off' && padSwap.live === 0 && padSwap.strip === padSwap.items && padSwap.stripRenamed === 'Tag' && padSwap.stripLive === 0 && padSwap.back === padSwap.was, JSON.stringify(padSwap));
     }
+
+    // Exact section lengths use the same shared-boundary rules as dragging.
+    const precise = await js(`(() => {
+      const a = window.__app;
+      const secs = a.state.song.sections.slice().sort((x, y) => x.bar - y.bar);
+      const before = secs.map((s) => [s.bar, s.len]);
+      a.selectSection(secs[0]);
+      const input = document.querySelector('#sectionLength');
+      input.value = 1;
+      input.dispatchEvent(new Event('change'));
+      const after = secs.map((s) => [s.bar, s.len]);
+      a.undo();
+      const restored = a.state.song.sections.slice().sort((x, y) => x.bar - y.bar).map((s) => [s.bar, s.len]);
+      return { before, after, restored };
+    })()`);
+    check('typing a section length adjusts its shared boundary and Undo restores it', precise.after[0][1] === 1 && precise.after[1][0] === precise.before[0][0] + 1 && precise.after[1][0] + precise.after[1][1] === precise.before[1][0] + precise.before[1][1] && JSON.stringify(precise.after.slice(2)) === JSON.stringify(precise.before.slice(2)) && JSON.stringify(precise.before) === JSON.stringify(precise.restored), JSON.stringify(precise));
+
+    // Work in temporary setlists; the user's real library is never involved.
+    const copies = await js(`(async () => {
+      const a = window.__app;
+      const lib = a.state.lib;
+      const oldSet = lib.currentSetlistId;
+      const oldSong = a.state.song.id;
+      const first = lib.songs[0];
+      const second = lib.songs[1];
+      const set = { id: 'clipboard-test', name: 'Clipboard test', songIds: [first.id, second.id, first.id] };
+      const other = { id: 'clipboard-target', name: 'Clipboard target', songIds: [] };
+      lib.setlists.push(set, other);
+      const switchSet = (id) => { const select = document.querySelector('#setSelect'); lib.currentSetlistId = id; a.drawFrame(); select.append(new Option(id, id)); select.value = id; select.dispatchEvent(new Event('change')); };
+      switchSet(set.id);
+      const click = (i, extra = {}) => document.querySelectorAll('#setlist li')[i].dispatchEvent(new MouseEvent('click', { bubbles: true, ...extra }));
+      const key = (k, extra = {}) => document.body.dispatchEvent(new KeyboardEvent('keydown', { key: k, ctrlKey: true, bubbles: true, cancelable: true, ...extra }));
+      await a.openSong(first.id, true, 2);
+      click(2);
+      document.activeElement.blur();
+      key('c'); key('v');
+      const pasted = set.songIds.slice();
+      const current = a.currentRow();
+      a.undo();
+      const undone = set.songIds.slice();
+      a.redo();
+      const redone = set.songIds.slice();
+      await a.openSong(first.id, true, 0);
+      a.undo();
+      const rowAfterUndo = a.currentRow();
+      click(0, { metaKey: true }); click(1, { shiftKey: true });
+      key('c');
+      switchSet(other.id);
+      key('v');
+      const cross = other.songIds.slice();
+      a.setLive(true); key('v');
+      const liveCount = other.songIds.length;
+      a.setLive(false);
+      switchSet(set.id);
+      await a.openSong(first.id, true, 2);
+      const lastHasNoNext = a.nextInSetlist(first) === null;
+      await a.openSong(first.id, true, 0);
+      const firstNext = a.nextInSetlist(first).id;
+      click(0); key('c'); key('v');
+      // Consecutive references to the same song must advance to row 1.
+      const wasEnd = first.atEnd;
+      first.atEnd = 'roll';
+      await a.songOver(true, first.id);
+      const repeatedRow = a.currentRow();
+      a.send({ cmd: 'stop' });
+      a.state.playWhenLoaded = null;
+      first.atEnd = wasEnd;
+      a.undo();
+      switchSet(oldSet);
+      await a.openSong(oldSong, true);
+      lib.setlists = lib.setlists.filter((x) => x !== set && x !== other);
+      return { first: first.id, second: second.id, pasted, current, undone, redone, cross, liveCount, lastHasNoNext, firstNext, repeatedRow, rowAfterUndo };
+    })()`);
+    check('copy and paste preserve order, support Undo/Redo and cross-setlist paste, and are locked in LIVE', copies.pasted.join() === [copies.first, copies.second, copies.first, copies.first].join() && copies.current === 2 && copies.undone.length === 3 && copies.redone.join() === copies.pasted.join() && copies.cross.join() === [copies.first, copies.second].join() && copies.liveCount === 2, JSON.stringify(copies));
+    check('repeated songs use the selected occurrence and advance to the next row', copies.rowAfterUndo === 0 && copies.lastHasNoNext && copies.firstNext === copies.second && copies.repeatedRow === 1, JSON.stringify(copies));
+    await sleep(300);
+
+    // Rename the selected row with Ctrl+R; Enter accepts and Undo restores.
+    const oldName = await js(`(() => { const a = window.__app; const set = a.state.lib.setlists.find((s) => s.id === a.state.lib.currentSetlistId); const i = set.songIds.indexOf(a.state.song.id); document.querySelectorAll('#setlist li')[i].click(); document.activeElement.blur(); return a.state.song.name; })()`);
+    await js(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, bubbles: true, cancelable: true }))`);
+    await until(`!!document.querySelector('#overlay .ask input')`, 3000, 'rename dialog');
+    const rename = await js(`(() => { const input = document.querySelector('#overlay .ask input'); const selected = input.selectionStart === 0 && input.selectionEnd === input.value.length; input.value = 'Renamed via shortcut'; input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return selected; })()`);
+    await sleep(100);
+    const renamed = await js(`({ name: window.__app.state.song.name, row: document.querySelector('#setlist li.current .nm').textContent })`);
+    await js('window.__app.undo()');
+    check('Ctrl+R selects the existing name; Enter renames the song and Undo restores it', rename && renamed.name === 'Renamed via shortcut' && renamed.row === renamed.name && await js('window.__app.state.song.name') === oldName, JSON.stringify(renamed));
+
+    const beforeMenuPaste = await js(`(() => { const a = window.__app; const set = a.state.lib.setlists.find((s) => s.id === a.state.lib.currentSetlistId); document.querySelectorAll('#setlist li')[set.songIds.indexOf(a.state.song.id)].click(); document.activeElement.blur(); return set.songIds.length; })()`);
+    win.webContents.send('menu', 'copy');
+    await sleep(50);
+    win.webContents.send('menu', 'paste');
+    await sleep(100);
+    check('the native Edit menu and Mac accelerators use the same setlist clipboard', await js('document.querySelectorAll("#setlist li").length') === beforeMenuPaste + 1);
+    await js('window.__app.undo()');
+    const typingKeys = await js(`(() => { const input = document.querySelector('#songName'); input.focus(); return ['c', 'v', 'r'].every((key) => input.dispatchEvent(new KeyboardEvent('keydown', { key, ctrlKey: true, bubbles: true, cancelable: true }))); })()`);
+    check('setlist shortcuts leave text-field keystrokes alone', typingKeys);
+    await js('document.activeElement.blur()');
+    await js('window.__app.selectSection(window.__app.state.song.sections[1])');
+    await shot('selah-selftest-section-edit.png');
+    await js('window.__app.selectSection(null)');
 
     // --- cue clips: a MIDI file from the Count In track gives a song its tempo and sections ---
     {
@@ -1248,6 +1498,107 @@ async function run({ app, getWindow, library, onEngine }) {
       check('at the smallest window size nothing in the top bar covers anything else, and the meters sit above the track names', bar.overlaps.length === 0 && bar.live === 'modeLive' && bar.lastRight <= bar.width && meters.inCorner && meters.wide > 150, JSON.stringify({ bar, meters }));
     }
 
+    const bpmSteps = await js(`(() => {
+      const input = document.querySelector('#songBpm');
+      input.value = '60.1'; input.dispatchEvent(new Event('change', { bubbles: true }));
+      const values = [];
+      for (const key of ['ArrowUp', 'ArrowUp', 'ArrowDown']) {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+        values.push(Number(input.value));
+      }
+      return values;
+    })()`);
+    check('BPM arrows change by exactly one while retaining decimal precision', JSON.stringify(bpmSteps) === '[61.1,62.1,61.1]', JSON.stringify(bpmSteps));
+
+    // Map mode records against the playback clock without seeking or touching audio input.
+    await js(`(async () => {
+      const a = window.__app;
+      a.setLive(false);
+      a.state.lib.settings.pauseRewinds = false;
+      const song = a.createSong('Mapping Test');
+      song.bpm = 240; song.bars = 12; song.atEnd = 'stop';
+      song.cues.enabled = true;
+      song.sections = [
+        { id: 'map-old-intro', name: 'Intro', bar: 0, len: 4, color: '#abcdef', cue: 'off' },
+        { id: 'map-old-chorus', name: 'Chorus', bar: 4, len: 4, cue: 'two' },
+        { id: 'map-old-outro', name: 'Outro', bar: 8, len: 4 },
+      ];
+      await a.openSong(song.id, true);
+    })()`);
+    await until(`window.__app.state.eng.songId === window.__app.state.song.id`, 5000, 'mapping song ready');
+    const mapBefore = await js('JSON.stringify(window.__app.state.song.sections)');
+    await js(`window.__app.send({ cmd: 'seek', seconds: 2.05 })`);
+    await until('window.__app.state.eng.pos >= 2', 3000, 'map start position');
+    await js(`document.querySelector('#btnMapMode').click(); document.querySelector('#btnPlay').click()`);
+    await until('window.__app.state.eng.playing && window.__app.state.eng.pos >= 2.1', 3000, 'mapping playback');
+    const mapTap = (name) => js(`Array.from(document.querySelectorAll('#mapSections button')).find((b) => b.dataset.name === ${JSON.stringify(name)}).click()`);
+    await js(`window.__app.state.song.click.enabled = false; window.__app.send({ cmd: 'setClick', songId: window.__app.state.song.id, click: window.__app.clickMessage(window.__app.state.song) })`);
+    peaks.length = 0;
+    await mapTap('Verse 1');
+    await sleep(180);
+    check('a mapping tap produces guide audio on ears with click disabled', (peaks[2] || 0) > 0 && (peaks[0] || 0) === 0 && (peaks[1] || 0) === 0, JSON.stringify(peaks));
+    const guideDuringMap = await js('window.__app.cueMessage(window.__app.state.song).enabled');
+    await until('window.__app.state.eng.pos >= 3.05', 3000, 'second mapping bar');
+    // Existing pads record their names during mapping, rather than jumping to them.
+    await js(`Array.from(document.querySelectorAll('#pads .pad')).find((p) => p.querySelector('.n').textContent === 'Chorus').click()`);
+    const mapNoJump = await js('({ pos: window.__app.state.eng.pos, pending: window.__app.state.eng.pending })');
+    await until('window.__app.state.eng.pos >= 5.05', 4000, 'third mapping bar');
+    await mapTap('Bridge');
+    await shot('selah-selftest-map-mode.png');
+    await until('window.__app.state.eng.pos >= 6.05', 3000, 'mapping end');
+    await js(`document.querySelector('#btnMapDone').click()`);
+    await until('!window.__app.state.eng.playing', 3000, 'mapping stopped');
+    const mapAfter = await js('JSON.stringify(window.__app.state.song.sections)');
+    const mapResult = await js(`({ active: !!window.__app.state.mapping, guide: window.__app.cueMessage(window.__app.state.song).enabled, sections: window.__app.state.song.sections.map((s) => [s.name, s.bar, s.len]), controls: !document.querySelector('#songBpm').disabled })`);
+    check('Map Mode records timed section changes, preserves untouched structure, and stops without seeking', JSON.stringify(mapResult.sections) === JSON.stringify([['Intro', 0, 2], ['Verse 1', 2, 1], ['Chorus', 3, 2], ['Bridge', 5, 1], ['Chorus', 6, 2], ['Outro', 8, 4]]) && mapNoJump.pos >= 3 && mapNoJump.pos < 3.5 && !mapNoJump.pending && !mapResult.active && mapResult.controls && guideDuringMap === true && mapResult.guide === true, JSON.stringify({ mapResult, mapNoJump }));
+    await js('window.__app.undo()');
+    const mapUndone = await js('JSON.stringify(window.__app.state.song.sections)');
+    await js('window.__app.redo()');
+    check('one Undo/Redo restores or reapplies the entire mapping pass, including guide overrides', mapUndone === mapBefore && await js('JSON.stringify(window.__app.state.song.sections)') === mapAfter);
+    await js(`window.__app.send({ cmd: 'seek', seconds: 7.05 })`);
+    await until('window.__app.state.eng.pos >= 7', 3000, 'discard start');
+    await js(`document.querySelector('#btnMapMode').click(); document.querySelector('#btnPlay').click()`);
+    await until('window.__app.state.eng.playing', 3000, 'discard playback');
+    await mapTap('Tag');
+    await js(`document.querySelector('#btnMapCancel').click()`);
+    await until('!window.__app.state.eng.playing', 3000, 'discard stopped');
+    check('Discard pass restores the complete pre-pass structure', await js('JSON.stringify(window.__app.state.song.sections)') === mapAfter);
+
+    await js(`(async () => {
+      const a = window.__app;
+      const song = a.createSong('Empty Mapping Test');
+      song.bpm = 240; song.bars = 2; song.sections = []; song.atEnd = 'roll';
+      await a.openSong(song.id, true);
+    })()`);
+    await until(`window.__app.state.eng.songId === window.__app.state.song.id`, 5000, 'empty mapping ready');
+    await js(`document.querySelector('#btnMapMode').click(); document.querySelector('#btnPlay').click()`);
+    await until('window.__app.state.eng.playing && window.__app.state.eng.pos > 0.05', 3000, 'empty mapping playback');
+    await mapTap('Intro');
+    await mapTap('Verse 1');
+    const sameBar = await js(`({ count: window.__app.state.mapping.markers.length, name: window.__app.state.mapping.markers[0].name })`);
+    await until('window.__app.state.eng.pos >= 2.1', 4000, 'growing beyond old end');
+    const grew = await js(`({ name: window.__app.state.song.name, active: !!window.__app.state.mapping, bars: window.__app.state.song.bars })`);
+    await js(`document.querySelector('#btnPlay').click()`);
+    await until('!window.__app.state.eng.playing', 3000, 'map pause');
+    const pausedMap = await js('JSON.stringify(window.__app.state.song.sections)');
+    await sleep(250);
+    check('empty songs gain sections, same-bar taps correct the name, and pause holds the mapping', sameBar.count === 1 && sameBar.name === 'Verse 1' && grew.active && grew.name === 'Empty Mapping Test' && grew.bars >= 2 && await js('JSON.stringify(window.__app.state.song.sections)') === pausedMap, JSON.stringify({ sameBar, grew }));
+    await js(`document.querySelector('#btnPlay').click()`);
+    await until('window.__app.state.eng.playing && window.__app.state.eng.pos >= 3.05', 4000, 'mapping resumed');
+    await js(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '7', bubbles: true, cancelable: true }))`);
+    await until('window.__app.state.eng.pos >= 4.05', 3000, 'empty map end');
+    await js(`document.querySelector('#btnStop').click()`);
+    await until('!window.__app.state.eng.playing', 3000, 'map stopped by transport');
+    const emptyMap = await js(`({ name: window.__app.state.song.name, active: !!window.__app.state.mapping, sections: window.__app.state.song.sections.map((s) => [s.name, s.bar, s.len]) })`);
+    check('number keys record sections and Stop commits the final length without rolling to another song', !emptyMap.active && emptyMap.name === 'Empty Mapping Test' && JSON.stringify(emptyMap.sections) === JSON.stringify([['Verse 1', 0, 3], ['Chorus', 3, 1]]), JSON.stringify(emptyMap));
+    await js(`window.__app.setLive(true); window.__app.startMapping()`);
+    check('LIVE mode cannot start a mapping pass', await js('window.__app.state.mapping === null'));
+    await js(`window.__app.setLive(false)`);
+
+    await runChartChecks();
+    }
+
+    }
     check('no engine errors reported', !events.some((e) => e.type === 'error' || e.type === 'outputError'), events.filter((e) => e.type === 'error' || e.type === 'outputError').map((e) => e.message).join('; '));
   } catch (err) {
     failed = true;

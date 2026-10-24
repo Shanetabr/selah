@@ -20,21 +20,21 @@ test('markers saved without a length run to the next marker, the last to the end
   assert.strictEqual(show(S.normalize([{ id: 'a', bar: 0, len: 2 }, { id: 'b', bar: 4, len: 99 }, { id: 'c', bar: 8 }], 10)), 'a:0-2 b:4-8 c:8-10');
 });
 
-test('moving a block right pushes the blocks it runs into; they keep their lengths', () => {
+test('moving a block shifts the whole tail, including gaps, without changing lengths', () => {
   const before = song();
   assert.strictEqual(show(S.move(before, 'v', 6, opts())), 'i:0-4 v:6-14 c:14-22 b:22-30');
   assert.strictEqual(show(before), 'i:0-4 v:4-12 c:12-20 b:20-28', 'the input is not changed');
-  // Into a gap nothing else moves.
+  // Gaps between later sections are preserved.
   const gap = [{ id: 'a', bar: 0, len: 2 }, { id: 'b', bar: 8, len: 2 }];
-  assert.strictEqual(show(S.move(gap, 'a', 4, opts())), 'a:4-6 b:8-10');
-  assert.strictEqual(show(S.move(gap, 'a', 7, opts())), 'a:7-9 b:9-11');
+  assert.strictEqual(show(S.move(gap, 'a', 4, opts())), 'a:4-6 b:12-14');
+  assert.strictEqual(show(S.move(gap, 'a', 7, opts())), 'a:7-9 b:15-17');
 });
 
 test('moving a block left stops at the block before it, and at the start', () => {
   assert.strictEqual(show(S.move(song(), 'c', 2, opts())), 'i:0-4 v:4-12 c:12-20 b:20-28');
   const gap = [{ id: 'a', bar: 2, len: 2 }, { id: 'b', bar: 8, len: 2 }];
   assert.strictEqual(show(S.move(gap, 'b', 1, opts())), 'a:2-4 b:4-6');
-  assert.strictEqual(show(S.move(gap, 'a', -3, opts())), 'a:0-2 b:8-10');
+  assert.strictEqual(show(S.move(gap, 'a', -3, opts())), 'a:0-2 b:6-8');
 });
 
 test('a push is refused when it would move a block past the end of the song', () => {
@@ -42,15 +42,15 @@ test('a push is refused when it would move a block past the end of the song', ()
   assert.strictEqual(show(S.move(song(), 'v', 11, opts({ limit: 27 }))), 'i:0-4 v:11-19 c:19-27 b:27-35');
   // A block already past the end (the audio got shorter) does not freeze the others.
   assert.strictEqual(show(S.move(song(), 'i', 0, opts({ limit: 10 }))), 'i:0-4 v:4-12 c:12-20 b:20-28');
-  assert.strictEqual(show(S.resizeEnd(song(), 'i', 3, opts({ limit: 10 }))), 'i:0-3 v:3-11 c:11-19 b:19-27');
-  assert.strictEqual(S.resizeEnd(song(), 'i', 5, opts({ limit: 10 })), null, 'but it cannot be pushed further out');
+  assert.strictEqual(show(S.resizeEnd(song(), 'i', 3, opts({ limit: 10 }))), 'i:0-3 v:3-12 c:12-20 b:20-28');
+  assert.strictEqual(show(S.resizeEnd(song(), 'i', 5, opts({ limit: 10 }))), 'i:0-5 v:5-12 c:12-20 b:20-28', 'later blocks remain where they were');
 });
 
-test('the right edge changes the length and everything after follows', () => {
-  assert.strictEqual(show(S.resizeEnd(song(), 'v', 16, opts())), 'i:0-4 v:4-16 c:16-24 b:24-32');
-  assert.strictEqual(show(S.resizeEnd(song(), 'v', 8, opts())), 'i:0-4 v:4-8 c:8-16 b:16-24');
+test('a shared right edge trades bars with the next section and leaves the rest fixed', () => {
+  assert.strictEqual(show(S.resizeEnd(song(), 'v', 16, opts())), 'i:0-4 v:4-16 c:16-20 b:20-28');
+  assert.strictEqual(show(S.resizeEnd(song(), 'v', 8, opts())), 'i:0-4 v:4-8 c:8-20 b:20-28');
   // Never shorter than one step.
-  assert.strictEqual(show(S.resizeEnd(song(), 'v', 0, opts())), 'i:0-4 v:4-5 c:5-13 b:13-21');
+  assert.strictEqual(show(S.resizeEnd(song(), 'v', 0, opts())), 'i:0-4 v:4-5 c:5-20 b:20-28');
 });
 
 test('the left edge moves the start only and stops at the block before', () => {
@@ -80,4 +80,17 @@ test('end and at', () => {
   assert.strictEqual(S.at(song(), 12).id, 'c');
   assert.strictEqual(S.at(song(), 11.99).id, 'v');
   assert.strictEqual(S.at([{ id: 'a', bar: 0, len: 2 }, { id: 'b', bar: 6, len: 2 }], 4), null);
+});
+
+
+test('shared edges work from either side and cannot consume a whole neighbour', () => {
+  assert.strictEqual(show(S.resizeStart(song(), 'c', 16, opts())), 'i:0-4 v:4-16 c:16-20 b:20-28');
+  assert.strictEqual(show(S.resizeEnd(song(), 'v', 99, opts())), 'i:0-4 v:4-19 c:19-20 b:20-28');
+  assert.strictEqual(show(S.resizeStart(song(), 'c', -99, opts())), 'i:0-4 v:4-5 c:5-20 b:20-28');
+});
+
+test('resizing into a gap stops at the next section and does not move it', () => {
+  const gap = [{ id: 'a', bar: 0, len: 2 }, { id: 'b', bar: 8, len: 4 }];
+  assert.strictEqual(show(S.resizeEnd(gap, 'a', 4, opts())), 'a:0-4 b:8-12');
+  assert.strictEqual(show(S.resizeEnd(gap, 'a', 20, opts())), 'a:0-8 b:8-12');
 });

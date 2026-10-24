@@ -7,7 +7,7 @@
 let audify = null;
 let audifyError = null;
 try {
-  audify = require('audify');
+  if (process.env.SELAH_TEST_OUTPUT !== '1') audify = require('audify');
 } catch (err) {
   audifyError = err;
 }
@@ -15,11 +15,9 @@ try {
 const FLOAT32 = 0x10; // RtAudioFormat.RTAUDIO_FLOAT32
 const MAX_CHANNELS = 64;
 
-// Devices Selah must never send audio to (owner's instruction, 2026-10-04),
-// matched against the device name. They are not listed, cannot be opened even
-// if saved in settings, and are never used as a fallback.
-const BLOCKED_DEVICES = [/volt/i, /midi/i];
-const allowed = (d) => d.outputChannels > 0 && !BLOCKED_DEVICES.some((re) => re.test(d.name));
+// Offer every device with audio outputs, including the Volt 4. MIDI-only
+// ports and input-only devices cannot play audio and are not offered.
+const allowed = (d) => d.outputChannels > 0;
 
 // The RtAudio backends worth offering on each platform, best first.
 function platformApis() {
@@ -252,3 +250,30 @@ class NullOutput {
 }
 
 module.exports = { listDevices, RtOutput, NullOutput, available: () => !!audify };
+
+// Only the explicit --selftest-no-audio run selects this backend. It never
+// loads audify, enumerates hardware, or opens a device alongside a live rig.
+if (process.env.SELAH_TEST_OUTPUT === '1') {
+  class TestOutput extends NullOutput {
+    constructor(opts) {
+      super(opts);
+      this.channels = opts.deviceName === 'Test stereo' ? 2 : 4;
+      this.deviceName = this.channels === 4 ? 'Test four outputs' : 'Test stereo';
+      this.apiId = 'test';
+      this.apiName = 'Test (no hardware)';
+      this.frozen = false;
+      const render = opts.render;
+      opts.render = (buf, n) => this.frozen ? null : render(buf, n);
+      const onBlock = opts.onBlock;
+      opts.onBlock = (meta) => { if (!this.frozen && onBlock) onBlock(meta); };
+    }
+    freeze(on) { this.frozen = !!on; }
+  }
+  module.exports = {
+    NullOutput, RtOutput: TestOutput, available: () => true,
+    listDevices: () => ({ error: null, apis: [{ id: 'test', name: 'Test (no hardware)', devices: [
+      { id: 1, name: 'Test four outputs', channels: 4, isDefault: true, preferredRate: 48000, rates: [44100, 48000] },
+      { id: 2, name: 'Test stereo', channels: 2, isDefault: false, preferredRate: 48000, rates: [44100, 48000] },
+    ] }] }),
+  };
+}

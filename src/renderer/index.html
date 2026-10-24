@@ -39,7 +39,7 @@
         <div class="nm"></div>
         <div class="lbl"></div>
       </div>
-      <button id="btnVoice">Voice<i></i></button>
+      <button id="btnVoice" aria-label="Voice commands">Voice<i></i></button>
       <button id="btnAudio" title="Audio device and output routing">Audio…</button>
     </header>
 
@@ -56,6 +56,7 @@
         <button id="btnStems" title="Open the stems folder, to drag a song's folder onto this window">Stems…</button>
         <button id="btnNewSong" title="Open stems or a cue clip, or start an empty song">+ Song</button>
       </div>
+      <div class="library-search"><input id="librarySearch" type="search" placeholder="Search songs…" aria-label="Search song library" title="Search the library. Enter returns to playback shortcuts; Esc clears the search." autocomplete="off" spellcheck="false"></div>
       <ul id="library"></ul>
       <div id="about" title="Which build of Selah this is"></div>
     </aside>
@@ -63,17 +64,19 @@
     <main id="main">
       <div id="songbar">
         <input id="songName" class="name" type="text" spellcheck="false" placeholder="Song name" title="Song name">
-        <label title="Tempo in quarter notes per minute, as Ableton shows it">BPM <input id="songBpm" type="number" min="20" max="400" step="0.01"></label>
-        <label>Sig <input id="songNum" type="number" min="1" max="24" step="1">/<select id="songDen"><option>2</option><option selected>4</option><option>8</option><option>16</option></select></label>
+        <label title="Tempo of the grid, generated click and guide. Does not change the speed of recorded stems.">BPM <input id="songBpm" type="number" min="20" max="400" step="1"></label>
+        <label title="Time signature">Meter <input id="songNum" type="number" min="1" max="24" step="1">/<select id="songDen"><option>2</option><option selected>4</option><option>8</option><option>16</option></select></label>
         <button id="btnDetect" title="Detect tempo and first beat from the click or drum stem">Detect</button>
         <label id="offsetWrap" title="Time of the first downbeat (bar 1) in the audio">Bar 1 at <input id="songOffset" type="number" min="0" step="0.001"> s</label>
         <button id="btnOffsetHere" title="Put bar 1 at the playhead">Set at playhead</button>
-        <label>Key <input id="songKey" class="key" type="text" spellcheck="false" maxlength="6"></label>
+        <label title="Song key for reference. Does not transpose recorded stems.">Key <input id="songKey" class="key" type="text" spellcheck="false" maxlength="6"></label>
         <span class="divider"></span>
         <label title="Selah's click, sent to the in-ears"><input id="clickOn" type="checkbox"> Click</label>
         <input id="clickGain" type="range" min="-40" max="6" step="0.5" title="Click level (double-click for 0 dB)">
-        <label title="Selah's guide voice: it says each section's name and counts it in, in the in-ears"><input id="cuesOn" type="checkbox"> Guide</label>
+        <label title="Automatic section announcements and counts from Selah. Recorded guide stems have their own mute control; live jumps can still be announced."><input id="cuesOn" type="checkbox"> Guide</label>
         <button id="btnSongSettings" title="Click, guide and tempo settings for this song">Song settings</button>
+        <button id="btnMapMode" title="Record section changes while the song plays">Map mode</button>
+        <button id="btnChart" title="Import a PDF lead sheet and review its timeline before applying">Import chart…</button>
         <span id="liveInfo"></span>
         <span class="divider"></span>
         <button id="btnAddSection" title="Add a section marker at the playhead's bar">+ Section</button>
@@ -81,6 +84,17 @@
         <button id="btnImport" title="Add stems to this song, or open a folder of stems or a cue clip as a new song">Open…</button>
       </div>
 
+      <div id="mapControls" hidden>
+        <div class="map-heading"><strong>MAP MODE</strong><span id="mapStatus"></span><button id="btnMapDone">Finish &amp; stop</button><button id="btnMapCancel">Discard pass</button></div>
+        <div id="mapSections"></div>
+        <div class="map-help">Tap a section as it begins. Each tap closes the previous section. Snaps to the nearest bar and replaces only the area you map. Each tap immediately plays the section name and count through the guide output.</div>
+      </div>
+      <div id="sectionEdit" hidden>
+        <strong id="sectionSelectedName"></strong>
+        <label>Start bar <input id="sectionStart" type="number" step="1"></label>
+        <label>Length <input id="sectionLength" type="number" min="1" step="1"> bars</label>
+        <span>Drag middle: move this and later sections · Drag edge: adjust boundary</span>
+      </div>
       <div id="timeline">
         <div id="rulerRow">
           <div class="corner">
@@ -118,6 +132,7 @@
   <script src="../shared/tempo.js"></script>
   <script src="../shared/clicktrack.js"></script>
   <script src="../shared/structure.js"></script>
+  <script src="../shared/chart.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

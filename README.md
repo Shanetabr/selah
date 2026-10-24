@@ -72,7 +72,7 @@ settings as well, delete the folder `~/Library/Application Support/selah`.
 ### Intel Mac or Windows: from source
 
 There is no ready-made app for these yet. You need
-[Node.js](https://nodejs.org) 22.12 or newer. Then, in a terminal, one line
+[Node.js](https://nodejs.org) 22.13 or newer. Then, in a terminal, one line
 at a time:
 
 ```bash
@@ -136,7 +136,11 @@ npm test
 npm run selftest
 ```
 
-`npm test` runs the unit tests. `npm run selftest` drives the real app end to
+`npm test` runs the unit tests. With Ableton or another live rig running,
+use `npm run selftest:no-audio`: it simulates four-channel and stereo outputs
+without loading the audio driver or opening hardware.
+
+`npm run selftest` drives the real app end to
 end and plays quietly for about a minute; put `SELAH_SILENT=1` in front of it
 to make no sound.
 
@@ -177,14 +181,14 @@ voice and the click sounds are there for Selah to play, not to be reused.
 3. **Mark sections.** Put the playhead on a bar and press **+ Section**, or
    double-click the strip above the bar numbers. A new section runs to the
    next one, or splits the one it lands in. Then shape them in that strip:
-   drag a block to move it, drag its right edge to make it longer or shorter
-   (everything after follows), drag its left edge to move only its start.
-   Blocks snap to bars (hold Option for beats) and never overlap: moving one
-   right pushes the ones after it, moving left stops at the one before.
-   Double-click to rename. Right-click a section's **pad** to turn it into
-   another section in one click (Verse, Chorus, Bridge…), to set its guide or
-   colour, or to delete it.
-   Clicking a block does not move playback; the pads do that.
+   click a block to select it and show its start bar and length fields.
+   Drag its middle to move it and all later sections together, preserving
+   their lengths and gaps. Drag a shared edge to trade bars between the two
+   neighbouring sections while keeping later sections fixed. Blocks snap to
+   bars (hold Option for beats) and cannot overlap.
+   Double-click to rename. Right-click a block or its bottom pad for section
+   names, guide/colour settings, and Delete. Cmd+Z undoes the edit.
+   Selecting a block does not move playback; the pads do that.
 4. **Route the outputs.** Press the audio button (top right). Pick the device,
    then where MAINS and EARS go. "Ears 1, mains 2" is how the Ableton set was
    wired (click on output 1, everything else on output 2). With four outputs,
@@ -198,6 +202,33 @@ voice and the click sounds are there for Selah to play, not to be reused.
    LIVE**. In LIVE nothing can be edited, the setlist is fixed, the keyboard
    always controls playback, and the pads and the readout get bigger. Volume,
    mute and solo still work. Going back to EDIT asks first.
+
+**From a PDF lead sheet.** In EDIT, choose **Import chart…**, use
+Library > + Song > From a PDF chart, or drop a PDF on the window. Selah reads
+text-based lead sheets locally and opens a **Review chart timeline** window.
+Select a colored block to edit its name and length; use Earlier/Later, drag,
+or Duplicate to arrange repeats. A duplicate stays visible as its own block
+with **No count-in**: it skips the repeated section announcement and spoken
+count while the click continues. Select it and enable **Announce / count into
+this section** to restore the song’s guide settings. **Merge with previous**
+joins adjacent sections with the same name into one longer block, keeping
+the first section’s guide setting and all band directions at their times.
+Both changes support Undo/Redo. Add or remove sections and band directions,
+and use the draft’s Undo/Redo while you work. With stems, the waveform uses
+the proposed BPM and “Bar 1 at” offset. Open the original PDF beside it to
+check the printed music.
+With recorded stems, this edits section markers and guide cues; duplicating
+or moving sections does not repeat or rearrange the recordings. BPM changes
+the grid and generated click/guide, and the Key field is for reference;
+neither control changes the recorded audio's speed or pitch.
+
+Check the chart notes for alternate endings, coda instructions, pickups, and
+time signature. Repeat signs are not automatically unfolded. Directions are
+optional until included. Check “this timeline looks right”, then **Approve &
+apply** (or create a new song). Applying replaces sections and directions and
+sets the song end to the reviewed arrangement; one Undo restores the prior
+setup. Cancel leaves the song untouched. Scanned PDFs and chord-only sheets
+are not supported yet. No CCLI sign-in or internet connection is needed.
 
 **No stems.** Library > + Song > Empty song (or Sample song to see one made).
 Type the BPM and time signature, then mark the sections. Selah plays its click
@@ -233,6 +264,21 @@ song, what a song does at its end, whether a tap while stopped moves the
 playhead or starts playing from that section's count-in, and **Confirm
 delete**: on, Selah asks before a song, tracks or a setlist are deleted; off,
 they go at once (Cmd+Z still brings back a song or tracks).
+
+**Planning Center.** In Settings > Planning Center, connect with a Planning
+Center API application ID and secret that has Services access. Choose
+**Import a plan…** to replace the current setlist with a plan's song order.
+Songs already in Selah are reused; missing songs are added as empty songs so
+you can set them up and add stems. Your credentials are encrypted in this
+computer's secure storage. Disconnect removes them.
+Settings is organized into **Playback**, **New song defaults**, **Voice
+commands**, and **About**. Audio settings is available from its footer or
+the top bar. The About page shows the build and activation status.
+
+**Library search.** Type part of a song name above the library to filter it;
+the setlist stays unchanged. Search also works in LIVE. While the search box
+has focus, typing does not trigger playback shortcuts. Enter returns focus
+to playback; Esc clears the search and returns focus.
 
 **A tap is always counted in.** While playing, the guide says "Chorus 2 3 4"
 and the jump lands after that bar, one to two bars after the tap. This happens
@@ -329,7 +375,30 @@ LIVE.
 **Selecting songs in the setlist** works the same way: Shift-click takes a
 run, Cmd-click adds or drops one, then drag them together to reorder or press
 × or Delete to take them all off the setlist (they stay in the library). A
-plain click still opens the song. Cmd+Z undoes a setlist change.
+plain click still opens the song. Ctrl+C / Ctrl+V (also Cmd+C / Cmd+V on Mac)
+copy selected rows and paste them after the selection, or at the end if no
+row is selected. Copy once, switch setlists, and paste there too. Pasted rows
+refer to the same library songs: edits and renaming apply to all occurrences.
+Ctrl+R / Cmd+R renames one selected song. Cmd+Z undoes a setlist change or
+rename. Pasting and renaming are disabled in LIVE; text fields keep their
+normal shortcuts.
+
+**Map mode: record the structure while listening.** In EDIT, open a song,
+choose **Map mode**, and press Play. Tap Verse, Chorus, Bridge or another
+section as it begins. The next tap closes the previous section and starts
+another, snapped to the nearest bar. The section buttons work even when the
+song has no markers; existing bottom pads also record their names instead of
+jumping playback. Number keys match the labels shown in the mapping panel.
+A second tap in the same bar corrects the name.
+
+The active section grows as playback runs and replaces old section/guide
+markers only within the mapped interval. Structure before and after that
+interval is preserved. The guide stays enabled during mapping. Each tap immediately plays a one-bar
+name/count at the song's guide speed and routing, taking priority over any
+announcement already playing without seeking or waiting for a bar line. This records section changes,
+not microphone audio. Pause holds your place; **Finish & stop** (or Stop)
+saves the pass and ends playback. **Discard pass** restores the previous
+structure. One Undo reverses the whole pass. Mapping is unavailable in LIVE.
 
 **Undo.** Cmd+Z undoes a change to a song's setup: tempo, signature, settings,
 sections, and the order of its tracks. It also brings back tracks you just

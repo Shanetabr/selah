@@ -5,11 +5,9 @@
 // bar, or null when the edit is not possible, and never changes its input.
 //
 // The rules, as the owner asked for them:
-//   - moving a block right pushes the blocks it runs into, and they keep
-//     their lengths; moving left stops at the block before
-//   - dragging a block's right edge makes it longer or shorter and everything
-//     after it follows by the same amount
-//   - dragging a block's left edge stops at the block before
+//   - moving a block shifts it and all later blocks by the same amount
+//   - resizing a shared boundary trades length between its two neighbours
+//   - gaps and earlier blocks are preserved; blocks never overlap
 //
 // opts: { min, limit, step }: the lowest bar a block may start at, the highest
 // (the end of a song with stems; Infinity otherwise), and the shortest length.
@@ -48,23 +46,14 @@
     return out;
   }
 
-  // Shifts the blocks from index i on to the right until nothing starts before `from`.
-  function pushRight(out, i, from) {
-    for (let k = i; k < out.length; k++) {
-      if (out[k].bar >= from - EPS) break;
-      out[k].bar = from;
-      from = out[k].bar + out[k].len;
-    }
-  }
-
   function move(list, id, bar, opts) {
     const out = copy(list);
     const i = out.findIndex((s) => s.id === id);
     if (i < 0) return null;
     const s = out[i];
     const floor = i > 0 ? out[i - 1].bar + out[i - 1].len : opts.min;
-    s.bar = Math.max(bar, floor, opts.min);
-    pushRight(out, i + 1, s.bar + s.len);
+    const delta = Math.max(bar, floor, opts.min) - s.bar;
+    for (let k = i; k < out.length; k++) out[k].bar += delta;
     return fits(out, list, opts) ? out : null;
   }
 
@@ -73,10 +62,16 @@
     const i = out.findIndex((s) => s.id === id);
     if (i < 0) return null;
     const s = out[i];
-    const len = Math.max(opts.step, end - s.bar);
-    const delta = len - s.len;
-    s.len = len;
-    for (let k = i + 1; k < out.length; k++) out[k].bar += delta;
+    const next = out[i + 1];
+    const shared = next && Math.abs(s.bar + s.len - next.bar) < EPS;
+    const nextEnd = next && next.bar + next.len;
+    const ceiling = next ? (shared ? nextEnd - opts.step : next.bar) : Infinity;
+    const at = Math.max(s.bar + opts.step, Math.min(end, ceiling));
+    s.len = at - s.bar;
+    if (shared) {
+      next.bar = at;
+      next.len = nextEnd - at;
+    }
     return fits(out, list, opts) ? out : null;
   }
 
@@ -86,6 +81,8 @@
     if (i < 0) return null;
     const s = out[i];
     const end = s.bar + s.len;
+    const prev = out[i - 1];
+    if (prev && Math.abs(prev.bar + prev.len - s.bar) < EPS) return resizeEnd(list, prev.id, bar, opts);
     const floor = i > 0 ? out[i - 1].bar + out[i - 1].len : opts.min;
     s.bar = Math.min(Math.max(bar, floor, opts.min), end - opts.step);
     s.len = end - s.bar;
@@ -121,5 +118,26 @@
     return null;
   }
 
-  return { normalize, move, resizeEnd, resizeStart, insert, end, at };
+  // Replace only the recorded interval. Preserve the full metadata of old
+  // sections outside it, splitting a section that spans both boundaries.
+  // `suffix` gives the restored tail a stable, distinct id during a pass.
+  function mapRange(original, markers, until, suffix) {
+    if (!markers.length) return original.map((s) => ({ ...s }));
+    const start = markers[0].bar;
+    if (!Number.isFinite(start) || start < 0 || !Number.isFinite(until) || until <= markers[markers.length - 1].bar) return null;
+    for (let i = 1; i < markers.length; i++) {
+      if (!Number.isFinite(markers[i].bar) || markers[i].bar <= markers[i - 1].bar) return null;
+    }
+    const out = [];
+    for (const s of original) {
+      const stop = s.bar + s.len;
+      if (stop <= start || s.bar >= until) { out.push({ ...s }); continue; }
+      if (s.bar < start) out.push({ ...s, len: start - s.bar });
+      if (stop > until) out.push({ ...s, id: s.bar < start ? s.id + '_tail_' + suffix : s.id, bar: until, len: stop - until });
+    }
+    markers.forEach((s, i) => out.push({ ...s, len: (markers[i + 1] ? markers[i + 1].bar : until) - s.bar }));
+    return out.sort((a, b) => a.bar - b.bar);
+  }
+
+  return { normalize, move, resizeEnd, resizeStart, insert, end, at, mapRange };
 });

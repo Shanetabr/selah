@@ -2,6 +2,7 @@ import { $, el, uid, toast, menu, modal, askText, fmtTime, gainToDb, dbToGain, f
 import { decodeToCache, loadPeaks, loadPcm, trackNameFromFile, folderNameOf, guessBus } from './importer.js';
 import { Timeline, sectionColor, sortedSections } from './timeline.js';
 import { Mic } from './mic.js';
+import { openChartReview } from './chart-review.js';
 
 const G = window.Grid;
 const Structure = window.Structure;
@@ -85,6 +86,11 @@ const state = {
   setSel: new Set(), // rows selected in the open setlist, by position; never saved
   setAnchor: null, // the row a Shift-click run starts from
   setSelFor: null, // the setlist the selection was made in
+  sectionId: null,
+  mapping: null, // current section-mapping pass; not saved
+  chartReview: null, // the import draft; the song is changed only on approval
+  playingRow: null, // { setId, index }; distinguishes repeated songs
+  queuedRow: null,
   voice: { on: false, names: [], level: 0, heard: null, at: 0 }, // voice control; never saved, off at every start
 };
 
@@ -294,6 +300,7 @@ function barLabel(bar) {
 // ---------- engine ----------
 
 function send(msg) {
+  if (msg.cmd === 'play' || msg.cmd === 'playFromBar') state.mappingStopSong = null;
   api.engine.send(msg);
 }
 
@@ -435,7 +442,7 @@ function songKey(song, rate) {
 
 // The spoken-cue settings plus the section markers they are placed from.
 function cueMessage(song) {
-  return Object.assign({}, song.cues, { scale: scaleOf(song), sections: song.sections.map((s) => ({ bar: s.bar, name: s.name, cue: s.cue })), callouts: (song.callouts || []).map((c) => ({ bar: c.bar, word: c.word })) });
+  return Object.assign({}, song.cues, { mapping: state.mapping?.songId === song.id, scale: scaleOf(song), sections: song.sections.map((s) => ({ bar: s.bar, name: s.name, cue: s.cue })), callouts: (song.callouts || []).map((c) => ({ bar: c.bar, word: c.word })) });
 }
 
 function sendCues() {
@@ -552,6 +559,10 @@ api.engine.onEvent((m) => {
   switch (m.type) {
     case 'state':
       state.eng = m;
+      if (state.mapping && m.songId === state.mapping.songId) {
+        if (m.playing) updateMapping(m.pos);
+        renderMapStatus();
+      }
       checkDevice(m);
       break;
     case 'devices':
@@ -560,6 +571,7 @@ api.engine.onEvent((m) => {
       openOutput();
       break;
     case 'output':
+      if (state.mapping) finishMapping(true);
       state.out = m;
       sendBuses();
       renderAudioButton();
@@ -611,6 +623,7 @@ api.engine.onEvent((m) => {
       }
       break;
     case 'engineRestarted':
+      if (state.mapping) finishMapping(true);
       toast('The audio engine restarted', 'error');
       state.out = null;
       send({ cmd: 'getDevices' });
@@ -626,12 +639,15 @@ api.engine.onEvent((m) => {
 // Space and the play button. Pausing either holds its place or, when Settings
 // says so, goes back to the start of the song like Stop does.
 function togglePlay() {
+  if (state.chartReview) return;
   if (!engineReady()) return;
   if (!state.eng.playing) send({ cmd: 'play' });
-  else send({ cmd: state.lib.settings.pauseRewinds ? 'stop' : 'pause' });
+  else if (state.lib.settings.pauseRewinds) stop();
+  else send({ cmd: 'pause' });
 }
 
 function stop() {
+  if (state.mapping) return finishMapping(true);
   send({ cmd: 'stop' });
   // Paused, nothing will report a stop: a lined-up song takes over from here.
   if (state.song && state.queued && !state.eng.playing && !state.eng.fading) songOver(false, state.song.id);
@@ -669,6 +685,7 @@ function atEndOf(song) {
 // to hand over to the next song; otherwise it has no end (null) and grows
 // when played past its last bar.
 function handoverBar(song) {
+  if (state.mapping?.songId === song.id && !hasStems(song)) return null;
   if (hasStems(song)) return song.end > 0 ? song.end : null;
   if (atEndOf(song) === 'stop' || !song.sections.length) return null;
   return Structure.end(song.sections);
@@ -741,43 +758,63 @@ function endSeconds(song) {
   return bar === null ? null : G.barToSeconds(song, bar);
 }
 
-function nextInSetlist(song) {
+function currentRow(song = state.song, set = currentSetlist()) {
+  const row = state.playingRow;
+  if (row && row.setId === set.id && (row.index === -1 || set.songIds[row.index] === (song && song.id))) return row.index;
+  return song ? set.songIds.indexOf(song.id) : -1;
+}
+
+function nextRow(song) {
   const set = currentSetlist();
-  const i = set.songIds.indexOf(song.id);
-  return (i >= 0 && state.lib.songs.find((s) => s.id === set.songIds[i + 1])) || null;
+  const i = currentRow(song, set);
+  return i >= 0 && i + 1 < set.songIds.length ? { setId: set.id, index: i + 1 } : null;
 }
 
-// The song that takes over when the open one is done: one lined up by hand,
-// or the next in the setlist when the open song is set to hand over.
+function songAtRow(row) {
+  const set = row && state.lib.setlists.find((s) => s.id === row.setId);
+  return set && state.lib.songs.find((s) => s.id === set.songIds[row.index]);
+}
+
+function nextInSetlist(song) {
+  return songAtRow(nextRow(song)) || null;
+}
+
+function comingRow() {
+  if (state.queued && songAtRow(state.queuedRow)?.id === state.queued) return state.queuedRow;
+  return state.song && atEndOf(state.song) !== 'stop' ? nextRow(state.song) : null;
+}
+
 function comingSong() {
-  const song = state.song;
-  if (!song) return null;
-  const byHand = state.queued && state.lib.songs.find((s) => s.id === state.queued);
-  if (byHand && byHand !== song) return byHand;
-  return atEndOf(song) === 'stop' ? null : nextInSetlist(song);
+  if (state.mapping) return null;
+  if (!state.song) return null;
+  return songAtRow(comingRow()) || (state.queued && state.lib.songs.find((s) => s.id === state.queued)) || null;
 }
 
-function queueSong(song) {
-  state.queued = state.queued === song.id ? null : song.id;
+function queueSong(song, row) {
+  const same = state.queued === song.id && state.queuedRow?.setId === row?.setId && state.queuedRow?.index === row?.index;
+  state.queued = same ? null : song.id;
+  state.queuedRow = same ? null : row;
   renderLists();
   toast(state.queued ? `"${song.name}" is lined up. It opens when this song stops or ends.` : `"${song.name}" is no longer lined up.`);
   if (state.queued) preloadNext();
 }
 
-// The open song has ended by itself (`natural`), or was stopped or faded out.
 async function songOver(natural, songId) {
   const from = state.song;
   if (!from || from.id !== songId) return;
-  const byHand = state.queued && state.lib.songs.find((s) => s.id === state.queued);
-  state.queued = null;
-  // By itself a song only hands over at its own end, never when it is stopped.
-  const to = byHand && byHand !== from ? byHand : natural && atEndOf(from) !== 'stop' ? nextInSetlist(from) : null;
-  if (!to) {
-    if (byHand) renderLists();
+  if (state.mappingStopSong === songId) return;
+  if (state.mapping) {
+    finishMapping(true, natural && hasStems(from) ? durationOf(from) : undefined);
     return;
   }
+  const byHand = state.queued && state.lib.songs.find((s) => s.id === state.queued);
+  const row = byHand ? state.queuedRow : natural && atEndOf(from) !== 'stop' ? nextRow(from) : null;
+  const to = byHand || songAtRow(row);
+  state.queued = null;
+  state.queuedRow = null;
+  if (!to) return renderLists();
   state.playWhenLoaded = natural && atEndOf(from) === 'roll' ? to.id : null;
-  await openSong(to.id, true);
+  await openSong(to.id, true, row && row.setId === currentSetlist().id ? row.index : undefined);
 }
 
 function howLongFor(song, sec) {
@@ -809,6 +846,7 @@ function songReadout(pos) {
 
 function seek(sec) {
   if (!engineReady()) return;
+  if (state.mapping) finishMapping(true);
   send({ cmd: 'seek', seconds: Math.max(0, Math.min(durationOf(state.song), sec)) });
 }
 
@@ -817,6 +855,8 @@ function seek(sec) {
 // Tapping a queued section again leaves it queued, so a nervous double tap
 // cannot undo a jump; Esc or a click on the "next" readout cancels.
 function jumpToSection(section, launch) {
+  if (state.chartReview) return;
+  if (state.mapping) return markMapSection(section.name);
   if (!engineReady()) return;
   if (launch && state.lib.settings.launch && !state.eng.playing) {
     send({ cmd: 'playFromBar', bar: section.bar });
@@ -907,6 +947,7 @@ function onVoice(m) {
     v.skipped = m.skipped;
     renderVoice();
   } else if (m.type === 'heard' && v.on) {
+    if (state.chartReview) return;
     // The same name twice within two seconds is one call, or its echo.
     const now = Date.now();
     if (v.heard === m.name && now - v.at < 2000) return;
@@ -946,14 +987,22 @@ function stepSection(dir) {
 // While a song is playing, opening another does not interrupt it: the other
 // song is lined up (see queueSong). `force` is for the hand-over itself, when
 // the engine has just said the song is over.
-async function openSong(id, force) {
+async function openSong(id, force, rowIndex) {
+  if (state.mapping && id !== state.song?.id) finishMapping(true);
+  if (state.mappingStopSong === state.song?.id) force = true;
   const song = state.lib.songs.find((s) => s.id === id);
-  if (!song || song === state.song) return;
+  if (!song) return;
+  const set = currentSetlist();
+  const index = Number.isInteger(rowIndex) ? rowIndex : song === state.song ? currentRow(song) : set.songIds.indexOf(id);
+  const row = { setId: set.id, index };
+  if (!force && song === state.song && index === currentRow(song)) return;
   if (state.eng.playing && !force) {
-    queueSong(song);
+    queueSong(song, row);
     return;
   }
-  if (state.queued === id) state.queued = null;
+  if (state.queued === id) { state.queued = null; state.queuedRow = null; }
+  state.playingRow = row;
+  state.lib.lastSongRow = { ...row };
   state.song = song;
   state.lib.lastSongId = id;
   state.peaks = new Map();
@@ -979,9 +1028,11 @@ function createSong(name) {
 //   cue clips (MIDI)    each a new song with tempo and sections; one on its
 //                       own can instead be the structure of the open song
 async function importPaths(paths) {
-  const { folders, files, cues } = await api.expandPaths(paths);
-  if (!folders.length && !files.length && !cues.length) {
-    toast('Nothing Selah can open there. It takes stems (WAV, MP3, M4A, FLAC, OGG) and cue clips (MIDI).');
+  if (state.chartReview) { toast('Finish or cancel the chart review first.'); return; }
+  if (state.mapping) finishMapping(true);
+  const { folders, files, cues, charts = [] } = await api.expandPaths(paths);
+  if (!folders.length && !files.length && !cues.length && !charts.length) {
+    toast('Nothing Selah can open there. It takes stems (WAV, MP3, M4A, FLAC, OGG), cue clips (MIDI), and PDF lead sheets.');
     return;
   }
   if (isLive() && files.length) {
@@ -992,6 +1043,7 @@ async function importPaths(paths) {
     toast('Stop playback before importing');
     return;
   }
+  if (charts.length && isLive()) { toast('Switch to EDIT to import a chart.'); return; }
   const twins = folders.filter((f) => songNamed(f.name));
   let replace = false;
   if (twins.length && !isLive()) {
@@ -1024,6 +1076,58 @@ async function importPaths(paths) {
   }
   if (files.length) await addStems(files);
   if (cues.length) await openCues(cues, !folders.length && !files.length);
+  for (const file of charts) await importChart(file);
+}
+
+async function importChart(file) {
+  if (isLive() || state.mapping || state.eng.playing) { toast('Stop playback and leave Map mode to import a chart in EDIT.'); return; }
+  if (state.chartReview || !$('#overlay').hidden) { toast('Close the open window first.'); return; }
+  if (!file) file = await api.chart.pick();
+  if (!file) return;
+  const target = state.song;
+  state.chartReview = { loading: true };
+  $('#toast').hidden = true;
+  const progress = progressDialog('Reading chart');
+  progress.set('Finding sections and measures on this computer…', 0.35);
+  try {
+    const incoming = await api.chart.read(file);
+    const words = await api.voiceWords();
+    progress.close();
+    const waveTrack = target?.tracks.find((t) => t.bus !== 'cue' && state.peaks.has(t.id)) || target?.tracks.find((t) => state.peaks.has(t.id));
+    await new Promise((resolve) => {
+      state.chartReview = openChartReview({
+        draft: incoming, target, words,
+        peaks: waveTrack ? state.peaks.get(waveTrack.id) : null,
+        duration: target ? Math.max(0, ...target.tracks.filter((t) => !t.missing).map((t) => t.duration || 0)) : 0,
+        onOpenSource: async () => { const error = await api.chart.open(file); if (error) toast(error, 'error'); },
+        onClose: () => { state.chartReview = null; resolve(); },
+        onApply: async (draft, choice) => {
+          if (isLive() || state.mapping || state.eng.playing) throw new Error('Stop playback and switch to EDIT before applying.');
+          const setup = window.Chart.setup(draft);
+          const twin = songNamed(setup.name);
+          if (twin && (choice === 'new' || twin !== target)) throw new Error('A song with this name already exists. Change the name, or cancel and open that song before importing.');
+          if (choice === 'current' && !state.lib.songs.includes(target)) throw new Error('The original song is no longer available. Create a new song instead.');
+          const song = choice === 'current' ? target : createSong(setup.name);
+          pushUndo(null, song);
+          Object.assign(song, setup);
+          delete song.double;
+          if (hasStems(song)) song.end = setup.bars;
+          else { delete song.end; song.offset = 0; }
+          // IDs belong to this song, including duplicated section instances.
+          song.sections.forEach((s) => { s.id = uid('m'); });
+          song.callouts.forEach((c) => { c.id = uid('c'); });
+          song.cues.enabled = draft.guideEnabled;
+          if (song === state.song) { state.sectionId = null; resendSetup(song); }
+          else await openSong(song.id, true);
+          saveSoon();
+          toast('Chart approved. The timeline is ready — you can keep editing it here.');
+        },
+      });
+    });
+  } catch (error) {
+    progress.close(); state.chartReview = null;
+    toast('Could not import chart: ' + error.message.replace(/^.*Error: /, ''), 'error');
+  }
 }
 
 // ---------- duplicates ----------
@@ -1272,7 +1376,7 @@ async function deleteSong(song) {
   }
   const ok = await confirmDelete({ message: `Delete "${song.name}"?`, detail: 'Its setup (tempo, sections, mix) is removed. Your stem files are not touched. Undo brings it back until you close Selah.', button: 'Delete' }, `Deleted "${song.name}". Cmd+Z brings it back.`);
   if (!ok) return;
-  const places = state.lib.setlists.map((set) => ({ id: set.id, at: set.songIds.indexOf(song.id) })).filter((x) => x.at >= 0);
+  const places = state.lib.setlists.flatMap((set) => set.songIds.flatMap((id, at) => id === song.id ? [{ id: set.id, at }] : []));
   undoStack.push({ kind: 'deleted', song, places });
   redoStack.length = 0;
   state.setSel.clear(); // rows are about to shift
@@ -1507,12 +1611,133 @@ function trackHeader(t) {
   return head;
 }
 
+// ---------- map mode ----------
+
+function mapBar(seconds) {
+  return Math.max(0, Math.round(G.secondsToBar(state.song, seconds)));
+}
+
+function renderMapStatus() {
+  const pass = state.mapping;
+  $('#btnMapMode').disabled = !state.song || isLive();
+  $('#btnMapMode').classList.toggle('on', !!pass);
+  $('#btnMapMode').textContent = pass ? 'Mapping…' : 'Map mode';
+  $('#mapControls').hidden = !pass;
+  if (!pass) return;
+  const last = pass.markers[pass.markers.length - 1];
+  const playing = engineReady() && state.eng.playing && !state.stalled;
+  $('#mapStatus').textContent = state.stalled ? 'Audio stopped — mapping paused' : !playing ? 'Paused — press Play to map' : !last ? 'Playing — tap the first section' : `${last.name} · from bar ${barLabel(last.bar)} · ${Math.max(1, pass.end - last.bar)} bars`;
+  for (const button of $('#mapSections').querySelectorAll('button')) {
+    button.disabled = !playing;
+    button.classList.toggle('active', !!last && button.dataset.name === last.name);
+  }
+}
+
+function startMapping() {
+  if (state.mapping || isLive() || !state.song) return;
+  if (!engineReady()) return toast('Wait for the song to finish loading');
+  const song = state.song;
+  ensureLengths(song);
+  const names = Array.from(new Set([...sortedSections(song).map((s) => s.name), ...SECTION_NAMES]));
+  const controls = Array.from(document.querySelectorAll('#songbar input, #songbar select, #songbar button:not(#btnMapMode), #btnNewSong, #setSelect')).map((node) => ({ node, disabled: node.disabled }));
+  state.mapping = {
+    songId: song.id, id: uid('map'), original: JSON.parse(JSON.stringify(song.sections)),
+    originalBars: song.bars, markers: [], names, controls, end: null, lastBar: mapBar(livePos()),
+    limit: hasStems(song) ? Math.max(1, Math.round(G.secondsToBar(song, durationOf(song)))) : Infinity,
+  };
+  for (const c of controls) c.node.disabled = true;
+  state.queued = null;
+  state.queuedRow = null;
+  state.playWhenLoaded = null;
+  selectSection(null);
+  document.body.classList.add('mapping');
+  const buttons = names.map((name, i) => el('button', { 'data-name': name, onclick: () => markMapSection(name) }, (i < 10 ? `${(i + 1) % 10} · ` : '') + name));
+  buttons.push(el('button', { onclick: async () => {
+    const pass = state.mapping;
+    const seconds = livePos();
+    const name = await askText('Section name', '', SECTION_NAMES);
+    if (name && state.mapping === pass) markMapSection(name, seconds);
+  } }, 'Other…'));
+  $('#mapSections').replaceChildren(...buttons);
+  send({ cmd: 'cancelJump' });
+  sendCues();
+  sendBars(song);
+  renderMapStatus();
+  renderLists();
+}
+
+function updateMapping(seconds, force = false) {
+  const pass = state.mapping;
+  if (!pass || state.song?.id !== pass.songId) return;
+  pass.lastBar = Math.max(pass.lastBar, Math.min(pass.limit, mapBar(seconds)));
+  const last = pass.markers[pass.markers.length - 1];
+  if (!last) return;
+  const end = Math.min(pass.limit, Math.max(last.bar + 1, pass.lastBar));
+  if (!force && pass.end === end) return;
+  const sections = Structure.mapRange(pass.original, pass.markers, end, pass.id);
+  if (!sections) return;
+  pass.end = end;
+  state.song.sections = sections;
+  state.sectionId = last.id;
+  sectionsChanged();
+  renderMapStatus();
+}
+
+function markMapSection(name, seconds = livePos()) {
+  const pass = state.mapping;
+  if (!pass || !engineReady() || !state.eng.playing || state.stalled) return;
+  const bar = mapBar(seconds);
+  if (bar >= pass.limit) return toast('The song has reached its last bar');
+  const last = pass.markers[pass.markers.length - 1];
+  if (last && bar < last.bar) return;
+  // Another tap in the same bar corrects the name; never creates a zero-length section.
+  if (last && last.bar === bar) last.name = name;
+  else pass.markers.push({ id: uid('m'), name, bar });
+  // Dispatch before rebuilding the timeline; the engine timestamps the cue itself.
+  send({ cmd: 'mapCue', songId: pass.songId, name });
+  pass.lastBar = Math.max(pass.lastBar, bar);
+  updateMapping(seconds, true);
+}
+
+function finishMapping(keep = true, seconds) {
+  const pass = state.mapping;
+  if (!pass) return;
+  // Stop before restoring the song's hand-over rule: the newly mapped end
+  // can be behind the playhead and must not roll into another song.
+  state.mappingStopSong = pass.songId;
+  send({ cmd: 'stop' });
+  if (keep) updateMapping(seconds === undefined ? livePos() : seconds, true);
+  const song = state.lib.songs.find((s) => s.id === pass.songId);
+  state.mapping = null;
+  document.body.classList.remove('mapping');
+  for (const c of pass.controls) c.node.disabled = c.disabled;
+  if (song && pass.markers.length) {
+    if (keep) {
+      undoStack.push({ kind: 'mapping', id: song.id, sections: pass.original, bars: pass.originalBars });
+      redoStack.length = 0;
+    } else {
+      song.sections = pass.original;
+      song.bars = pass.originalBars;
+    }
+  }
+  if (song === state.song) {
+    selectSection(null);
+    sectionsChanged();
+    timeline.durationChanged();
+  }
+  renderMapStatus();
+  renderLists();
+  saveSoon();
+  if (pass.markers.length) toast(keep ? 'Mapping saved. Undo restores the previous structure.' : 'Mapping discarded. The previous structure is restored.');
+}
+
 // ---------- sections ----------
 
 // A new section splits the one it lands in, or fills the gap it lands in: up
 // to the next section, or to the end of the song. So marking sections in
 // order works as it always did, each one running until the next.
 function addSection(bar, name) {
+  if (state.mapping) return markMapSection(name);
   const song = state.song;
   ensureLengths(song);
   const id = uid('m');
@@ -1590,6 +1815,7 @@ function resendSetup(song) {
 }
 
 function stepHistory(from, to) {
+  if (state.mapping) finishMapping(true);
   if (isLive()) {
     toast('LIVE mode. Switch to EDIT to make changes.');
     return;
@@ -1616,8 +1842,21 @@ function stepHistory(from, to) {
     // The order and the songs of a setlist, as they were.
     const set = state.lib.setlists.find((x) => x.id === entry.id);
     if (!set) return stepHistory(from, to);
-    to.push({ kind: 'setlist', id: set.id, songIds: set.songIds.slice() });
-    set.songIds = entry.songIds.filter((id) => state.lib.songs.some((s) => s.id === id));
+    const targetRows = entry.songIds.map((id, i) => i).filter((i) => state.lib.songs.some((s) => s.id === entry.songIds[i]));
+    const rowMap = entry.rowMap && targetRows.map((i) => entry.rowMap.indexOf(i));
+    to.push({ kind: 'setlist', id: set.id, songIds: set.songIds.slice(), rowMap });
+    // Follow the occurrence that is playing now, even if another row was
+    // opened after the edit. Undo must not restore an old playback position.
+    for (const key of ['playingRow', 'queuedRow']) {
+      const row = state[key];
+      if (row && row.setId === set.id && entry.rowMap && row.index >= 0) {
+        const original = entry.rowMap[row.index];
+        state[key] = { setId: set.id, index: original >= 0 ? targetRows.indexOf(original) : -1 };
+      }
+    }
+    if (state.queuedRow?.index === -1) { state.queuedRow = null; state.queued = null; }
+    set.songIds = targetRows.map((i) => entry.songIds[i]);
+    state.lib.lastSongRow = state.playingRow && { ...state.playingRow };
     state.setSel.clear();
     renderLists();
     saveSoon();
@@ -1625,6 +1864,14 @@ function stepHistory(from, to) {
   }
   const song = state.lib.songs.find((x) => x.id === entry.id);
   if (!song) return stepHistory(from, to);
+  if (entry.kind === 'mapping') {
+    to.push({ kind: 'mapping', id: song.id, sections: JSON.parse(JSON.stringify(song.sections)), bars: song.bars });
+    song.sections = JSON.parse(JSON.stringify(entry.sections));
+    song.bars = entry.bars;
+    if (song === state.song) { sectionsChanged(); timeline.durationChanged(); }
+    saveSoon();
+    return;
+  }
   if (entry.kind === 'removed') {
     // Only ever on the undo side, like a deleted song: put the tracks back
     // where they were, unless the same file has been added again since.
@@ -1655,7 +1902,7 @@ function stepHistory(from, to) {
   to.push({ kind: 'song', id: song.id, at: 0, snap: snapshot(song) });
   restoreSetup(song, entry.snap);
   saveSoon();
-  if (song !== state.song) toast(`Changed "${song.name}" back`);
+  if (song !== state.song) { renderLists(); toast(`Changed "${song.name}" back`); }
 }
 
 function sectionsChanged() {
@@ -1664,6 +1911,7 @@ function sectionsChanged() {
   sendBars(state.song); // the end of the last section may be where the song hands over
   sendCues();
   renderPads();
+  renderSectionSelection();
   timeline.requestDraw();
   saveSoon();
 }
@@ -1680,7 +1928,39 @@ function pickSectionName(x, y, onPick) {
   menu(x, y, items);
 }
 
+function selectSection(section) {
+  state.sectionId = section ? section.id : null;
+  renderPads();
+  renderSectionSelection();
+  timeline.requestDraw();
+}
+
+function renderSectionSelection() {
+  const section = state.song && state.song.sections.find((s) => s.id === state.sectionId);
+  $('#sectionEdit').hidden = !section || isLive();
+  if (!section) return;
+  $('#sectionSelectedName').textContent = section.name;
+  $('#sectionStart').value = Math.round((section.bar + 1) * 100) / 100;
+  $('#sectionLength').value = Math.round(section.len * 100) / 100;
+}
+
+function editSectionNumber(mode, input) {
+  const song = state.song;
+  const section = song && song.sections.find((s) => s.id === state.sectionId);
+  const value = Number(input.value);
+  if (!section || isLive() || state.mapping || !input.value || !Number.isFinite(value)) return renderSectionSelection();
+  const target = mode === 'move' ? Math.round(value) - 1 : section.bar + Math.max(1, Math.round(value));
+  const result = Structure[mode](song.sections, section.id, target, { min: Math.floor(G.secondsToBar(song, 0)), limit: hasStems(song) ? Math.max(0, endBarOf(song) - 1) : Infinity, step: 1 });
+  if (result && result.some((s) => { const old = song.sections.find((x) => x.id === s.id); return s.bar !== old.bar || s.len !== old.len; })) {
+    pushUndo();
+    for (const s of result) Object.assign(song.sections.find((x) => x.id === s.id), { bar: s.bar, len: s.len });
+    sectionsChanged();
+  }
+  renderSectionSelection();
+}
+
 function sectionMenu(section, x, y, mode) {
+  if (state.mapping) return;
   if (isLive()) return;
   const rename = async () => {
     const v = await askText('Rename section', section.name, SECTION_NAMES);
@@ -1805,9 +2085,9 @@ function removeSection(section) {
 
 // Right-click on a pad: make this part of the song something else in one
 // click (a Bridge that is really a Chorus). Its guide and colour are one step
-// further, in sectionMenu. The pads are the only place with a section menu;
-// the strip above the bar numbers is for dragging.
+// further, in sectionMenu. The timeline uses this same menu.
 function padMenu(section, x, y) {
+  if (state.mapping) return;
   if (isLive()) return;
   const rename = (name) => {
     if (!name || name === section.name) return;
@@ -1829,6 +2109,8 @@ function padMenu(section, x, y) {
 function renderAll() {
   renderLists();
   renderSong();
+  renderSectionSelection();
+  renderMapStatus();
 }
 
 function songMeta(song) {
@@ -1842,6 +2124,58 @@ function songMeta(song) {
 // plain click still opens the song. state.setSel holds positions in the open
 // setlist, so it is cleared whenever the rows change. Not in LIVE, where the
 // setlist is fixed.
+let setlistClipboard = [];
+
+function selectedSetRows() {
+  const set = currentSetlist();
+  const rows = Array.from(state.setSel).filter((i) => i >= 0 && i < set.songIds.length).sort((a, b) => a - b);
+  if (rows.length) return rows;
+  const i = state.setAnchor;
+  return Number.isInteger(i) && i >= 0 && i < set.songIds.length ? [i] : [];
+}
+
+function copySetSongs() {
+  const set = currentSetlist();
+  const rows = selectedSetRows();
+  if (!rows.length) return false;
+  setlistClipboard = rows.map((i) => set.songIds[i]);
+  toast(`Copied ${rows.length} song${rows.length === 1 ? '' : 's'}`);
+  return true;
+}
+
+function pasteSetSongs() {
+  if (isLive()) return;
+  const ids = setlistClipboard.filter((id) => state.lib.songs.some((s) => s.id === id));
+  if (!ids.length) return;
+  const set = currentSetlist();
+  const rows = selectedSetRows();
+  const at = rows.length ? rows[rows.length - 1] + 1 : set.songIds.length;
+  const out = set.songIds.slice();
+  const sources = out.map((id, i) => i);
+  out.splice(at, 0, ...ids);
+  sources.splice(at, 0, ...ids.map(() => -1));
+  changeSetlist(set, out, ids.map((id, i) => at + i), sources);
+}
+
+async function renameSetSong() {
+  if (isLive()) return;
+  const rows = selectedSetRows();
+  if (rows.length !== 1) return toast('Select one song to rename');
+  const song = songAtRow({ setId: currentSetlist().id, index: rows[0] });
+  if (!song) return;
+  const name = await askText('Rename song', song.name);
+  if (!name || name === song.name || isLive() || !state.lib.songs.includes(song)) return;
+  pushUndo(null, song);
+  song.name = name;
+  renderLists();
+  if (song === state.song) $('#songName').value = name;
+  saveSoon();
+}
+
+function typingText(target = document.activeElement) {
+  return target && (target.isContentEditable || target.tagName === 'TEXTAREA' || (target.tagName === 'INPUT' && !['range', 'checkbox', 'button'].includes(target.type)));
+}
+
 function selectInSetlist(i, e) {
   const set = currentSetlist();
   if (e.shiftKey) {
@@ -1868,10 +2202,19 @@ function setRowsFor(i) {
 }
 
 // Every change to a setlist's rows comes through here, so Cmd+Z undoes it.
-function changeSetlist(set, songIds, keep) {
-  undoStack.push({ kind: 'setlist', id: set.id, songIds: set.songIds.slice() });
+function changeSetlist(set, songIds, keep, sourceRows) {
+  if (!state.playingRow && state.song) state.playingRow = { setId: currentSetlist().id, index: currentRow() };
+  undoStack.push({ kind: 'setlist', id: set.id, songIds: set.songIds.slice(), rowMap: sourceRows });
+  if (sourceRows) {
+    for (const key of ['playingRow', 'queuedRow']) {
+      const row = state[key];
+      if (row && row.setId === set.id && row.index >= 0) state[key] = { setId: set.id, index: sourceRows.indexOf(row.index) };
+    }
+    if (state.queuedRow && state.queuedRow.index < 0) { state.queuedRow = null; state.queued = null; }
+  }
   redoStack.length = 0;
   set.songIds = songIds;
+  state.lib.lastSongRow = state.playingRow && { ...state.playingRow };
   state.setSel = new Set(keep || []);
   state.setAnchor = null;
   renderLists();
@@ -1880,7 +2223,8 @@ function changeSetlist(set, songIds, keep) {
 
 function removeFromSetlist(rows) {
   const set = currentSetlist();
-  changeSetlist(set, set.songIds.filter((id, k) => !rows.includes(k)));
+  const keep = set.songIds.map((id, k) => k).filter((k) => !rows.includes(k));
+  changeSetlist(set, keep.map((k) => set.songIds[k]), [], keep);
   if (rows.length > 1) toast(`${rows.length} songs taken off the setlist. They are still in the library, and Cmd+Z puts them back.`, 'long');
 }
 
@@ -1894,7 +2238,9 @@ function moveInSetlist(rows, to) {
   const at = rest.findIndex((x) => x.k === to) + (rows[0] < to ? 1 : 0);
   const out = rest.map((x) => x.id);
   out.splice(at, 0, ...moving);
-  changeSetlist(set, out, rows.length > 1 ? moving.map((id, n) => at + n) : null);
+  const sources = rest.map((x) => x.k);
+  sources.splice(at, 0, ...rows);
+  changeSetlist(set, out, rows.length > 1 ? moving.map((id, n) => at + n) : null, sources);
 }
 
 function renderLists() {
@@ -1913,9 +2259,10 @@ function renderLists() {
   set.songIds.forEach((id, i) => {
     const song = lib.songs.find((s) => s.id === id);
     if (!song) return;
-    const coming = song === comingSong();
+    const next = comingRow();
+    const coming = next && next.setId === set.id && next.index === i;
     const li = el(
-      'li' + (song === state.song ? '.current' : '') + (coming ? '.coming' : '') + (coming && state.queued === id ? '.byhand' : '') + (!isLive() && state.setSel.has(i) ? '.sel' : ''),
+      'li' + (song === state.song && currentRow(song, set) === i ? '.current' : '') + (coming ? '.coming' : '') + (coming && state.queued === id ? '.byhand' : '') + (!isLive() && state.setSel.has(i) ? '.sel' : ''),
       { draggable: !isLive(), title: (coming ? 'Up next. ' : '') + (isLive() ? 'Click to open, or to line it up while a song plays' : 'Click to open, or to line it up while a song plays. Shift-click or Cmd-click to select several. Drag to reorder.') },
       el('span.idx', null, i + 1),
       el('span.nm', null, song.name),
@@ -1936,7 +2283,7 @@ function renderLists() {
       if (!isLive() && (e.shiftKey || e.metaKey || e.ctrlKey)) return selectInSetlist(i, e);
       clearSetSel();
       state.setAnchor = i;
-      openSong(id);
+      openSong(id, false, i);
     });
     li.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/x-setlist-index', String(i)));
     li.addEventListener('dragover', (e) => {
@@ -1958,9 +2305,16 @@ function renderLists() {
   });
   if (!set.songIds.length) list.append(el('div.hint', null, 'This setlist is empty. Add songs from the library below, or drop a folder of stems on the window.'));
 
+  renderLibrary();
+}
+
+function renderLibrary() {
+  const lib = state.lib, set = currentSetlist();
+  const query = $('#librarySearch').value.trim().toLocaleLowerCase();
   const library = $('#library');
   library.replaceChildren();
-  for (const song of lib.songs.slice().sort((a, b) => a.name.localeCompare(b.name))) {
+  const songs = lib.songs.filter((s) => s.name.toLocaleLowerCase().includes(query)).sort((a, b) => a.name.localeCompare(b.name));
+  for (const song of songs) {
     const li = el(
       'li' + (song === state.song ? '.current' : ''),
       { title: isLive() ? 'Click to add to the end of the setlist' : 'Click to open' },
@@ -2004,12 +2358,14 @@ function renderLists() {
     library.append(li);
   }
   if (!lib.songs.length) library.append(el('div.hint', null, 'No songs yet. Press + Song and choose "Sample song" to see how it works.'));
+  else if (!songs.length) library.append(el('div.hint', { role: 'status' }, 'No matching songs. Try another name or clear the search.'));
 }
 
 function renderSong() {
   const song = state.song;
   // A selection belongs to the song it was made in.
   if (state.selSong !== (song && song.id)) {
+    state.sectionId = null;
     state.selSong = song && song.id;
     state.sel.clear();
   }
@@ -2088,8 +2444,10 @@ function renderPads() {
     const key = i < 9 ? String(i + 1) : i === 9 ? '0' : '';
     const pad = el('button.pad', { onclick: () => jumpToSection(s, true) }, el('span.k', null, (key ? key + ' · ' : '') + 'bar ' + barLabel(s.bar)), el('span.n', null, s.name));
     pad.style.setProperty('--c', sectionColor(s));
+    pad.classList.toggle('selected', !isLive() && state.sectionId === s.id);
     pad.addEventListener('contextmenu', (e) => {
       e.preventDefault();
+      selectSection(s);
       padMenu(s, e.clientX, e.clientY);
     });
     pads.append(pad);
@@ -2705,14 +3063,20 @@ function showSettings() {
   if (isLive()) return;
   const settings = state.lib.settings;
   const d = settings.defaults;
-  const body = el('div.form');
+  const body = el('div.settings-browser');
+  const pages = [['playback', 'Playback'], ['defaults', 'New song defaults'], ['voice', 'Voice commands'], ['planning', 'Planning Center'], ['about', 'About']];
+  let page = 'playback', closed = false;
+  let pcConnected = false;
+  api.planningCenter.status().then((connected) => { pcConnected = connected; if (!closed) refresh(); }).catch(() => {});
   let micList = [];
   Mic.inputs().then((list) => {
     micList = list;
-    refresh();
-  });
+    if (!closed) refresh();
+  }).catch(() => {}); // Playback settings remain usable without a microphone.
   const refresh = () => {
-    body.replaceChildren(
+    const panels = Object.fromEntries(pages.map(([id, label]) => [id, el('section.form.settings-page', { id: 'settings-' + id, 'aria-label': label, hidden: page !== id })]));
+    const group = (id, ...nodes) => panels[id].append(...nodes);
+    group('playback',
       el('h4', null, 'PLAYBACK'),
       el('span.lbl', null, 'Pausing'),
       pickFrom(
@@ -2740,10 +3104,16 @@ function showSettings() {
         'setAtEnd'
       ),
       el('div.note.full', null, 'A song with stems ends where its audio ends. A song with no stems ends after its last section when it is to hand over; set to "Stops there" it has no end and keeps going. One song can do something else: see its Song settings. While a song plays, a click on another song lines it up without interrupting.'),
-      el('h4', null, 'KEY'),
+    );
+    group('about',
+      el('h4', null, 'SELAH'),
+      el('div.note.full', null, $('#about').textContent),
+      el('h4', null, 'ACTIVATION'),
       el('span.lbl', null, 'This copy'),
       el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, el('span', { id: 'keyLevel' }, state.keyLevel === 'full' ? 'Full key' : 'Basic key'), el('button', { id: 'btnChangeKey', onclick: changeKey }, 'Enter another key…')),
-      el('h4', null, 'VOICE CONTROL'),
+    );
+    group('voice',
+      el('h4', null, 'VOICE COMMANDS'),
       el('span.lbl', null, 'Microphone'),
       pickFrom(
         [['', 'The computer\'s own choice']].concat(micList.map((m) => [m.id, m.label || 'Microphone ' + (micList.indexOf(m) + 1)])),
@@ -2757,6 +3127,46 @@ function showSettings() {
         'setMic'
       ),
       el('div.note.full', null, 'The Voice button in the top bar switches it on; it is off every time Selah starts. Say a section\'s name, "chorus" or "bridge", and Selah does what a tap on its pad does, with the count. Say the name without its number: "verse" goes to the next verse. It listens on this computer only; nothing is sent anywhere. Use in-ears or headphones: through speakers it hears Selah\'s own guide.'),
+    );
+    const pcApp = el('input', { type: 'text', autocomplete: 'off', spellcheck: false, placeholder: 'API application ID' });
+    const pcSecret = el('input', { type: 'password', autocomplete: 'new-password', placeholder: 'API secret' });
+    const pcConnect = el('button.primary', { onclick: async () => {
+      try {
+        await api.planningCenter.connect({ appId: pcApp.value, secret: pcSecret.value });
+        pcConnected = true; pcSecret.value = ''; refresh();
+      } catch (error) { toast(error.message, 'error'); }
+    } }, pcConnected ? 'Reconnect' : 'Connect');
+    const importPcPlan = async () => {
+      if (state.eng.playing || isLive()) return toast('Stop playback and switch to EDIT before importing a plan.');
+      try {
+        const plans = await api.planningCenter.plans();
+        if (!plans.length) return toast('No Planning Center plans were found.');
+        const labels = plans.map((p) => `${p.title}${p.dates ? ' · ' + p.dates : ''}`);
+        const selected = await api.choose({ message: 'Choose a Planning Center plan', detail: 'The plan’s song order will replace the current Selah setlist. Songs missing from your library will be added as empty songs for setup.', buttons: labels });
+        if (selected < 0) return;
+        const items = await api.planningCenter.items(plans[selected].id);
+        if (!items.length) return toast('That plan has no song items.');
+        const set = currentSetlist();
+        const ok = await api.confirm({ message: `Import “${plans[selected].title}” into “${set.name}”?`, detail: `${items.length} song entries will replace the current setlist order. Existing library songs are reused; missing songs are added empty.`, button: 'Import plan' });
+        if (!ok) return;
+        const ids = items.map(({ title }) => {
+          let song = songNamed(title);
+          if (!song) { song = newSong(title); state.lib.songs.push(song); }
+          return song.id;
+        });
+        changeSetlist(set, ids);
+        renderLists(); saveSoon();
+        toast(`Imported ${ids.length} songs from Planning Center.`);
+      } catch (error) { toast('Planning Center: ' + error.message, 'error'); }
+    };
+    group('planning',
+      el('h4', null, 'PLANNING CENTER SERVICES'),
+      el('div.note.full', null, 'Connect with a Planning Center API application ID and secret. Selah stores them encrypted in this computer’s secure storage. Create credentials in your Planning Center developer account and grant Services access.'),
+      el('span.lbl', null, pcConnected ? 'Connected' : 'API application ID'),
+      ...(pcConnected ? [] : [pcApp, el('span.lbl', null, 'API secret'), pcSecret, pcConnect]),
+      ...(pcConnected ? [el('div.row', null, el('button.primary', { onclick: importPcPlan }, 'Import a plan…'), el('button', { onclick: async () => { await api.planningCenter.disconnect(); pcConnected = false; refresh(); } }, 'Disconnect'))] : []),
+    );
+    group('playback',
       el('h4', null, 'DELETING'),
       el('span.lbl', null, 'Confirm delete'),
       pickFrom(
@@ -2786,7 +3196,10 @@ function showSettings() {
         },
         'setLaunch'
       ),
-      el('div.note.full', null, 'A tap while playing is always counted in: the guide says "Chorus 2 3 4" and the jump lands after that bar, even on a song whose own guide is off. A section called Tag is never announced.'),
+      el('div.note.full', null, 'Live jumps normally include a spoken count even when automatic Guide is off. Sections set to "No guide here", and Tags left on automatic, stay silent.'),
+    );
+    group('defaults',
+      el('div.note.full', null, 'These defaults apply to new songs. Existing songs keep their own settings unless you use “Apply to every song” below.'),
       el('h4', null, 'NEW SONGS START WITH: CLICK'),
       ...clickRows(d.click, { before: () => {}, after: () => saveSoon() }),
       el('h4', null, 'NEW SONGS START WITH: GUIDE'),
@@ -2832,12 +3245,22 @@ function showSettings() {
             },
           },
           'Apply to every song…'
-        ),
-        el('button.primary', { onclick: () => m.close() }, 'Done')
+        )
       )
     );
+    const nav = el('nav.settings-nav', { 'aria-label': 'Settings categories' });
+    const show = (id) => {
+      stopPreview(); page = id;
+      for (const [key, panel] of Object.entries(panels)) panel.hidden = key !== page;
+      for (const button of nav.children) button.setAttribute('aria-pressed', String(button.dataset.page === page));
+      body.querySelector('.settings-content').scrollTop = 0;
+    };
+    for (const [id, label] of pages) nav.append(el('button', { 'data-page': id, 'aria-pressed': String(page === id), 'aria-controls': 'settings-' + id, onclick: () => show(id) }, label));
+    body.replaceChildren(nav, el('div.settings-content', null, Object.values(panels)),
+      el('div.settings-footer', null, el('button', { onclick: () => { m.close(); showAudioSettings(); } }, 'Audio settings…'), el('span.spacer'), el('button.primary', { onclick: () => m.close() }, 'Done')));
   };
-  const m = modal('SETTINGS', body, { onClose: stopPreview });
+  const m = modal('SETTINGS', body, { onClose: () => { closed = true; stopPreview(); } });
+  body.closest('.modal').classList.add('settings-modal');
   refresh();
 }
 
@@ -2846,6 +3269,7 @@ function showSettings() {
 // playback. The mix, the pads and moving from song to song stay live, and an
 // unplanned song can still be added to the end of the setlist.
 function setLive(on) {
+  if (on && state.mapping) finishMapping(true);
   state.lib.settings.live = !!on;
   document.body.classList.toggle('live', !!on);
   $('#modeEdit').classList.toggle('on', !on);
@@ -2853,6 +3277,7 @@ function setLive(on) {
   if (on && document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
   if (on) clearSelection();
   if (on) state.setSel.clear();
+  if (on) selectSection(null);
   renderLiveInfo();
   renderLists();
   timeline.durationChanged();
@@ -2980,7 +3405,7 @@ async function detectTempo(quiet) {
 function bindSongBar() {
   const onSong = (sel, evt, fn) =>
     $(sel).addEventListener(evt, (e) => {
-      if (state.song) fn(e.target);
+      if (state.song) fn(e.target, e);
     });
   onSong('#songName', 'change', (t) => {
     pushUndo();
@@ -2990,6 +3415,11 @@ function bindSongBar() {
     saveSoon();
   });
   onSong('#songBpm', 'change', (t) => setBpm(parseFloat(t.value)));
+  onSong('#songBpm', 'keydown', (t, e) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    e.preventDefault();
+    setBpm((parseFloat(t.value) || typedBpm(state.song)) + (e.key === 'ArrowUp' ? 1 : -1));
+  });
   onSong('#songNum', 'change', (t) => {
     pushUndo();
     state.song.num = Math.max(1, Math.min(24, parseInt(t.value, 10) || 4));
@@ -3065,6 +3495,12 @@ function bindSongBar() {
 // ---------- sidebar ----------
 
 function bindSidebar() {
+  $('#librarySearch').addEventListener('input', renderLibrary);
+  $('#librarySearch').addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault(); e.stopPropagation();
+    e.target.value = ''; renderLibrary(); e.target.blur();
+  });
   $('#setSelect').addEventListener('change', (e) => {
     state.lib.currentSetlistId = e.target.value;
     renderLists();
@@ -3130,6 +3566,7 @@ function bindSidebar() {
     const r = e.target.getBoundingClientRect();
     menu(r.left, r.bottom + 2, [
       { label: 'Open stems or a cue clip…', action: openDialog },
+      { label: 'From a PDF chart…', action: () => importChart() },
       // Only macOS can offer files and folders in one dialog.
       ...(api.platform === 'darwin' ? [] : [{ label: 'From a folder of stems…', action: newFromFolder }]),
       { label: 'Empty song…', action: newEmptySong },
@@ -3141,6 +3578,21 @@ function bindSidebar() {
 // ---------- input ----------
 
 function bindGlobal() {
+  $('#btnChart').onclick = () => importChart();
+  $('#btnMapMode').onclick = () => state.mapping ? finishMapping(true) : startMapping();
+  $('#btnMapDone').onclick = () => finishMapping(true);
+  $('#btnMapCancel').onclick = () => finishMapping(false);
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || typingText(e.target) || !$('#overlay').hidden) return;
+    const key = e.key.toLowerCase();
+    if (!['c', 'v', 'r'].includes(key)) return;
+    e.preventDefault();
+    if (key === 'c') copySetSongs();
+    else if (key === 'v') pasteSetSongs();
+    else renameSetSong();
+  });
+  $('#sectionStart').addEventListener('change', (e) => editSectionNumber('move', e.target));
+  $('#sectionLength').addEventListener('change', (e) => editSectionNumber('resizeEnd', e.target));
   $('#btnPlay').onclick = togglePlay;
   $('#btnStop').onclick = stop;
   $('#btnFade').onclick = fadeOut;
@@ -3172,8 +3624,8 @@ function bindGlobal() {
 
   document.addEventListener('keydown', (e) => {
     const tag = e.target.tagName;
-    // Locked, the keyboard always belongs to playback.
-    const typing = !isLive() && tag === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox';
+    // Library search remains usable in LIVE; typing must never trigger playback.
+    const typing = (!isLive() || e.target.id === 'librarySearch') && tag === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox';
     if (typing || (!isLive() && tag === 'SELECT') || !$('#overlay').hidden || e.ctrlKey || (e.metaKey && e.key !== 'Backspace') || e.altKey) {
       if (typing && e.key === 'Enter') e.target.blur();
       return;
@@ -3188,12 +3640,19 @@ function bindGlobal() {
     else if (e.key === 'Home') seek(0);
     else if (e.key === 'f' || e.key === 'F') fadeOut();
     else if (e.key === 'Escape') {
+      selectSection(null);
       send({ cmd: 'cancelJump' });
       clearSelection();
       clearSetSel();
     } else if ((e.key === 'Backspace' || e.key === 'Delete') && selectedTracks().length) removeTracks(selectedTracks());
     else if ((e.key === 'Backspace' || e.key === 'Delete') && state.setSel.size && !isLive()) removeFromSetlist(Array.from(state.setSel));
     else if (/^[0-9]$/.test(e.key) && state.song) {
+      if (state.mapping) {
+        e.preventDefault();
+        const name = state.mapping.names[e.key === '0' ? 9 : parseInt(e.key, 10) - 1];
+        if (name) markMapSection(name);
+        return;
+      }
       const s = sortedSections(state.song)[e.key === '0' ? 9 : parseInt(e.key, 10) - 1];
       if (s) jumpToSection(s, true);
     } else return;
@@ -3255,15 +3714,34 @@ function bindGlobal() {
   });
 
   api.onMenu(async (action) => {
+    if (state.chartReview) {
+      if (action === 'copy' || action === 'paste') { if (typingText()) api.editText(action); }
+      else if (action === 'undo' || action === 'redo') {
+        if (typingText()) document.execCommand(action);
+        else state.chartReview[action]?.();
+      }
+      return;
+    }
+    if (action === 'copy' || action === 'paste') {
+      if (typingText()) api.editText(action);
+      else if ($('#overlay').hidden) {
+        if (action === 'copy') copySetSongs();
+        else pasteSetSongs();
+      }
+      return;
+    }
     if (isLive() && action !== 'audioSettings' && action !== 'zoomIn' && action !== 'zoomOut') {
       toast('LIVE mode. Switch to EDIT to make changes.');
       return;
     }
+    if (state.mapping && ['newSong', 'sampleSong', 'open', 'newFromFolder', 'audioSettings'].includes(action)) finishMapping(true);
     if (action === 'newSong') newEmptySong();
     else if (action === 'sampleSong') newSampleSong();
     else if (action === 'open') openDialog();
+    else if (action === 'importChart') importChart();
     else if (action === 'newFromFolder') newFromFolder();
     else if (action === 'audioSettings') showAudioSettings();
+    else if (action === 'renameSong' && !typingText() && $('#overlay').hidden) renameSetSong();
     else if (action === 'zoomIn') timeline.setZoom(timeline.pps * 1.4);
     else if (action === 'zoomOut') timeline.setZoom(timeline.pps / 1.4);
     else if (action === 'undo' || action === 'redo') {
@@ -3443,6 +3921,10 @@ async function start() {
   await askKey();
   const saved = await api.loadLibrary();
   state.lib = saved && saved.songs ? saved : defaultLib();
+  // The library file could not be read (main kept a copy of it). Then the
+  // decoded audio is left alone: what it belongs to is not known.
+  const damaged = !!(saved && saved.damaged);
+  delete state.lib.damaged;
   state.clickSounds = await api.clickSounds().catch(() => state.clickSounds);
   if (!state.lib.setlists || !state.lib.setlists.length) Object.assign(state.lib, { setlists: defaultLib().setlists });
   if (!state.lib.settings) state.lib.settings = defaultLib().settings;
@@ -3478,10 +3960,10 @@ async function start() {
     getCurrentSection: currentSection,
     getMaxBar: () => (hasStems(state.song) ? Math.max(0, endBarOf(state.song) - 1) : Infinity),
     getGuide: () => state.guide,
-    isLocked: isLive,
+    isLocked: () => isLive() || !!state.mapping,
     onSeek: seek,
     onEditStart: pushUndo,
-    onEditMove: growToFit,
+    onEditMove: () => { growToFit(); renderSectionSelection(); },
     onEditEnd: sectionsChanged,
     onEndMove: moveSongEnd,
     onEndDone: songEndMoved,
@@ -3490,6 +3972,9 @@ async function start() {
     getEndSnap: () => endSnap(state.song),
     getEndTip: () => 'The end of the song. Drag it to cut the song short or make it longer. Right-click: how finely it snaps.' + (state.song && hasStems(state.song) ? ' Double-click: back to the end of the audio.' : ''),
     onSectionMenu: sectionMenu,
+    onSectionContext: padMenu,
+    onSelectSection: selectSection,
+    getSelectedSection: () => state.sectionId,
     onAddSectionAt: (bar) => pickSectionName(window.innerWidth / 2 - 70, 120, (name) => addSection(bar, name)),
   });
 
@@ -3503,9 +3988,11 @@ async function start() {
   api.appInfo().then((info) => {
     $('#about').textContent = 'v' + info.version + (info.build ? '  ·  ' + info.build.commit + '  ·  ' + info.build.date : '  ·  from source');
   });
-  pruneCache();
+  if (damaged) toast(saved.songs ? 'Your library file could not be read, so the backup from the save before was opened. A copy of the unreadable file was kept in the data folder.' : 'Your library file could not be read, so Selah started empty. A copy of the unreadable file was kept in the data folder; nothing was deleted.', 'error');
+  else pruneCache();
 
   state.song = state.lib.songs.find((s) => s.id === state.lib.lastSongId) || null;
+  state.playingRow = state.lib.lastSongRow || null;
   renderAll();
   renderAudioButton();
   requestAnimationFrame(tick);
@@ -3513,6 +4000,6 @@ async function start() {
 }
 
 // Hooks for the automated self-test (npm run selftest).
-window.__app = { state, importPaths, openSong, createSong, newSampleSong, detectTempo, addSection, jumpToSection, send, undo: () => stepHistory(undoStack, redoStack), redo: () => stepHistory(redoStack, undoStack), deleteSong, setLive, selectedTracks, pruneCache, cueMessage, songReadout: () => songReadout(livePos()), sendBars, previewClick, drawFrame, setVoice, voiceTarget, engineBuses, trackMessage, clickMessage, resendRouting, defaultSplit, answers: [], readout: () => nextReadout(livePos()), getTimeline: () => timeline };
+window.__app = { state, importChart, importPaths, openSong, createSong, newSampleSong, detectTempo, addSection, jumpToSection, send, undo: () => stepHistory(undoStack, redoStack), redo: () => stepHistory(redoStack, undoStack), deleteSong, setLive, selectedTracks, pruneCache, cueMessage, songReadout: () => songReadout(livePos()), sendBars, previewClick, drawFrame, setVoice, voiceTarget, engineBuses, trackMessage, clickMessage, resendRouting, defaultSplit, answers: [], readout: () => nextReadout(livePos()), getTimeline: () => timeline, selectSection, copySetSongs, pasteSetSongs, renameSetSong, currentRow, nextInSetlist, songOver, startMapping, markMapSection, finishMapping, updateMapping };
 
 start();

@@ -1,7 +1,7 @@
 {
   "name": "selah",
   "productName": "Selah BETA",
-  "version": "0.3.0-beta.1",
+  "version": "0.3.0-beta.7",
   "description": "Multitrack playback for live worship: stems, click, sections, dual-output routing.",
   "main": "src/main/main.js",
   "private": true,
@@ -10,11 +10,13 @@
     "dev": "electron . --dev",
     "test": "node --test \"test/*.test.js\"",
     "selftest": "electron . --selftest",
+    "selftest:no-audio": "electron . --selftest-no-audio",
     "build:win": "node scripts/build.js win32",
     "build:mac": "node scripts/build.js darwin"
   },
   "dependencies": {
     "audify": "1.10.1",
+    "pdfjs-dist": "6.4.299",
     "sherpa-onnx-node": "1.13.8"
   },
   "devDependencies": {

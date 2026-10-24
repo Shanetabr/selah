@@ -22,15 +22,27 @@ class Library {
     this.writing = new Map(); // temp path -> file handle of a cache file being written
   }
 
+  // The library, or null when there is none yet. A file that is there but
+  // cannot be read is copied aside first, so the next save cannot bury it,
+  // and `damaged` tells the window not to clean up any decoded audio.
   load() {
+    let damaged = false;
     for (const f of [this.file, this.file + '.bak']) {
+      if (!fs.existsSync(f)) continue;
       try {
-        return JSON.parse(fs.readFileSync(f, 'utf8'));
+        const lib = JSON.parse(fs.readFileSync(f, 'utf8'));
+        if (damaged) lib.damaged = true;
+        return lib;
       } catch (err) {
-        // Missing or damaged; try the backup, then start empty.
+        damaged = true;
+        try {
+          fs.copyFileSync(f, `${f}.damaged-${Date.now()}`);
+        } catch (e) {
+          // Keep going: the backup may still be readable.
+        }
       }
     }
-    return null;
+    return damaged ? { damaged: true } : null;
   }
 
   // Write to a temp file and rename, so a crash mid-save cannot leave a
