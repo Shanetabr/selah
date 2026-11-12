@@ -5,11 +5,12 @@
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Multitrack playback for live worship, built to replace Ableton on stage.**
+**Multitrack playback for live shows, built to replace Ableton on stage.**
 
-Worship teams commonly run their backing tracks, click and spoken guide cues
-from Ableton Live. That works, but it's a full DAW that one wrong click can
-derail mid-service. Selah does just that job. Import a song's stems, set its
+Bands, theatre crews and worship teams commonly run backing tracks, click
+and spoken guide cues from Ableton Live. That works, but it's a full DAW that
+one wrong click can derail mid-show. Selah does just that job. Import a
+song's stems, set its
 tempo, mark its sections, send click and guide to the in-ears and the band
 tracks to the mains, then jump between sections on the bar line with a
 spoken count-in.
@@ -34,7 +35,7 @@ spoken count-in.
 - **Routing for real rigs.** Two feeds (in-ears / front of house) on any
   outputs, or separate channels for a Dante desk: click, guide and named
   stem groups each on their own output.
-- **LIVE mode.** Locks editing during a service and makes the pads and
+- **LIVE mode.** Locks editing during a show and makes the pads and
   readouts bigger.
 - **Voice control, on device.** A small keyword-spotting model (sherpa-onnx)
   listens for section names. Nothing is sent anywhere.
