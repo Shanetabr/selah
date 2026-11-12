@@ -3,6 +3,20 @@
   "productName": "Selah BETA",
   "version": "0.3.0-beta.7",
   "description": "Multitrack playback for live worship: stems, click, sections, dual-output routing.",
+  "license": "MIT",
+  "author": "Shane Abraham",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Shanetabr/selah.git"
+  },
+  "keywords": [
+    "worship",
+    "multitrack",
+    "playback",
+    "click-track",
+    "electron",
+    "live-audio"
+  ],
   "main": "src/main/main.js",
   "private": true,
   "scripts": {
